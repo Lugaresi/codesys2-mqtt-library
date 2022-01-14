@@ -1,0 +1,1522 @@
+
+
+(* @NESTEDCOMMENTS := 'Yes' *)
+(* @PATH := '\/FCFB\/MQTT_Client' *)
+(* @OBJECTFLAGS := '0, 8' *)
+(* @SYMFILEFLAGS := '2048' *)
+FUNCTION_BLOCK FB_CalculateRemainingLength
+VAR_INPUT
+	wNumberOfBytes: WORD;
+END_VAR
+VAR_OUTPUT
+	iRemainingLengthLength	: INT;
+	abRemainingLengthBytes	: ARRAY[0..3] OF BYTE;
+END_VAR
+VAR
+	bEncodedByte: BYTE;
+	wValue: WORD;
+	iCount: INT;
+END_VAR
+(* @END_DECLARATION := '0' *)
+(*
+Notes:
+- The Remaining Length is the number of bytes remaining within the current packet, including data in the variable header and the payload. The Remaining Length does not include the bytes used to encode the Remaining Length.
+- The Remaining Length is encoded using a variable length encoding scheme which uses a single byte for values up to 127. Larger values are handled as follows.
+  The least significant seven bits of each byte encode the data, and the most significant bit is used to indicate that there are following bytes in the representation.
+  Thus each byte encodes 128 values and a "continuation bit". The maximum number of bytes in the Remaining Length field is four.
+*)
+
+wValue := wNumberOfBytes;
+iCount := 0;
+REPEAT
+	bEncodedByte := UINT_TO_BYTE(wValue MOD 128);
+	wValue := wVALUE / 128;
+
+	(* if there are more data to encode, set the top bit of this byte *)
+	IF (wVALUE > 0) THEN
+		bEncodedByte := (bEncodedByte OR 128);
+	END_IF
+	abRemainingLengthBytes[iCount] := bEncodedByte;
+	iCount := iCount + 1;
+UNTIL (wValue <= 0)
+END_REPEAT;
+iRemainingLengthLength := iCount;
+END_FUNCTION_BLOCK
+
+
+(* @NESTEDCOMMENTS := 'Yes' *)
+(* @PATH := '\/FCFB\/MQTT_Client' *)
+(* @OBJECTFLAGS := '0, 8' *)
+(* @SYMFILEFLAGS := '2048' *)
+FUNCTION_BLOCK FB_DecodeRemainingLength
+VAR_INPUT
+	pabRemainingLengthBytes: POINTER TO ARRAY[0..3] OF BYTE;
+END_VAR
+VAR_OUTPUT
+	uiRemainingLength: UINT;
+	iRemainingLengthLength: INT;
+	xError : BOOL;
+END_VAR
+VAR
+	multiplier: UINT;
+	value: UINT;
+	iCount: INT;
+END_VAR
+(* @END_DECLARATION := '0' *)
+(*
+Notes:
+- The Remaining Length is the number of bytes remaining within the current packet, including data in the variable header and the payload. The Remaining Length does not include the bytes used to encode the Remaining Length.
+- The Remaining Length is encoded using a variable length encoding scheme which uses a single byte for values up to 127. Larger values are handled as follows.
+  The least significant seven bits of each byte encode the data, and the most significant bit is used to indicate that there are following bytes in the representation.
+  Thus each byte encodes 128 values and a "continuation bit". The maximum number of bytes in the Remaining Length field is four.
+*)
+
+multiplier := 1;
+value := 0;
+iCount :=-1;
+xError := FALSE;
+REPEAT
+	iCount := iCount + 1;
+	IF iCount >= 4 THEN iCount := 0; xError := TRUE; EXIT; END_IF	(* security *)
+
+	value := value + (pabRemainingLengthBytes^[iCount] AND 127) * multiplier;
+	multiplier := multiplier * 128;
+UNTIL ((pabRemainingLengthBytes^[iCount] AND 128) = 0)
+END_REPEAT;
+uiRemainingLength := value;
+iRemainingLengthLength := iCount + 1;
+END_FUNCTION_BLOCK
+
+
+(* @NESTEDCOMMENTS := 'Yes' *)
+(* @PATH := '\/FCFB\/MQTT_Client' *)
+(* @OBJECTFLAGS := '0, 8' *)
+(* @SYMFILEFLAGS := '2048' *)
+(*	This Function Block implements an MQTT Client
+	Version: 2.6
+	Supported:
+		CONNECT / DISCONNECT / PING (Keep Alive)
+		SUBSCRIBE / UNSUBSCRIBE (single topic)
+		PUBLISH (send / receive, QoS0: at most once)
+		Retain Messages
+		Optional Last Will and Testament
+		Optional ClientId and Username, Password authentication
+
+MQTT v3.1.1 Specification: https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/mqtt-v3.1.1.html
+*)
+FUNCTION_BLOCK FB_MQTTClient
+
+VAR CONSTANT
+	BUFFER_SIZE						: INT := 535;	(* = 536 since it starts at 0. CONNECT packet might be the biggest packet at 528 bytes, so round up to next ^2. *)
+	MQTT_TOPIC_MAX_LENGTH		: UINT := 80;
+	MQTT_MESSAGE_MAX_LENGTH	: UINT := 255;
+	MQTT_USERNAME_MAX_LENGTH	: UINT := 80;
+	MQTT_PASSWORD_MAX_LENGTH	: UINT := 80;
+END_VAR
+
+VAR_INPUT
+	i_xEnable								: BOOL := TRUE;										(* Enables the Function block, The rising Edge of this Input automatically connects to the MQTT Broker - Standard: TRUE *)
+	i_sBrokerAddress						: STRING := 'www.mqtt-dashboard.com';				(* IP-Address (example: 192.168.178.101) or Webaddress (www.mqtt-dashboard.com) of the MQTT Broker *)
+	i_uiPort								: UINT := 1883;										(* Port of the MQTT Broker - Standard: 1883 *)
+	i_sUsername							: STRING(MQTT_USERNAME_MAX_LENGTH) := '';	(* Optional Username if required *)
+	i_sPassword							: STRING(MQTT_PASSWORD_MAX_LENGTH) := '';	(* Optional Password if required *)
+	i_sClientIdentifier						: STRING(23) := '';										(* Optional Client Identifier. A ramdom generated name will be used if empty. *)
+	i_xCleanSession						: BOOL;												(* Clean Session *)
+	i_sWillTopic							: STRING(MQTT_TOPIC_MAX_LENGTH) := '';		(* Last Will Topic if required (Automatically enables Will Message IF changed) - otherwise leave untouched *)
+	i_sWillMessage						: STRING(MQTT_MESSAGE_MAX_LENGTH) := '';	(* Last Will Message if required - otherwise leave untouched *)
+	i_xWillRetain							: BOOL := FALSE;										(* Retain Last Will Message, if required Standard: FALSE - otherwise leave untouched  *)
+	i_xAutoReconnect						: BOOL := TRUE;										(* Automatically try to reconnect after an Exception - Standard: TRUE. A Broker is permitted to disconnect a Client that it determines to be inactive or non-responsive at any time, regardless of the Keep Alive value provided by that Client. *)
+	i_sPublishMessage					: STRING(MQTT_MESSAGE_MAX_LENGTH)		:= 'Hello MQTT Broker from CoDeSys';	(* PayLoad to Publish *)
+	i_sPublishTopic						: STRING(MQTT_TOPIC_MAX_LENGTH)			:= 'CoDeSys';								(* Topic to Publish to *)
+	i_sSubscribeTopic					: STRING(MQTT_TOPIC_MAX_LENGTH)			:= 'CoDeSys';								(* Topic to Subscribe to *)
+	i_sUnsubscribeTopic					: STRING(MQTT_TOPIC_MAX_LENGTH)			:= 'CoDeSys';								(* Topic to Unsubscribe from *)
+	i_xRetain								: BOOL := TRUE;										(* Retain Flag Forces the Broker to Retain the Last Mesage - Standard: TRUE *)
+	i_xPublish								: BOOL := FALSE;										(* Publish the Payload to the Topic of the MQTT Broker *)
+	i_xSubscribe							: BOOL := FALSE;										(* Subscribe to the Topic given to the Input i_sTopicSubscribe *)
+	i_xUnsubscribe						: BOOL := FALSE;										(* Unsubscribe to the Topic given to the Input i_sTopicSubscribe *)
+	i_tKeepAliveTimeInterval				: TIME := t#1m;										(* Keep Alive time interval (max = 18 hours 12 minutes and 15 seconds), default = 1 minute. *)
+	i_tCommTimeout						: TIME := t#1s;											(* General communication timeout *)
+END_VAR
+
+VAR_OUTPUT
+	q_sLastReceivedTopic				: STRING(MQTT_TOPIC_MAX_LENGTH);			(* Topic of Message Received *)
+	q_sLastReceivedMessage			: STRING(MQTT_MESSAGE_MAX_LENGTH);		(* Message Received from a subsribed Topic *)
+	q_xReceivedMessageNotification	: BOOL;												(* Message Received Notification *)
+	q_sLog								: STRING(89);											(* Log Message. 89 should be enough for the currently generated messages. Increase if needed in future version *)
+	q_wState								: WORD;												(* Current State of the Function Block: bit10:1=error; bit9:0=receive,1=send; MSB=MQTT Control Packet Type; LSB=step or error number*)
+	q_xError								: BOOL;												(* Error Flag *)
+	q_xConnected							: BOOL;												(* Current connection state *)
+	q_xIDLE								: BOOL;												(* TRUE when idle. Means waiting for incoming packet or any send command *)
+	q_sLastError							: STRING(89);											(* Contains the last error *)
+END_VAR
+
+VAR
+	R_TRIG_Enable						: R_TRIG;
+
+	diSocket								: DINT ;
+	IoCtlParameter						: DINT := 1;											 (* Set Push-Bit - HACK for Wago 841 - 881 according to OSCAT *)
+	sockAddr								: SOCKADDRESS;
+	xResult								: BOOL;
+	diRecvResult							: DINT;
+	diSendResult							: DINT;
+	abInBuffer								: ARRAY[0..BUFFER_SIZE] OF BYTE;					(* PUBLISH is the biggest packet. Its size should not exceed 9+MESSAGE_MAX_LENGHT+TOPIC_MAX_LENGHT, but as this is not possible in CodeSys, let start with 512 sized Input Buffer *)
+	abOutBuffer							: ARRAY[0..BUFFER_SIZE] OF BYTE;
+
+	fbRandom								: ARRAY[1..8] OF FB_Random;
+	dwTime								: DWORD;
+
+	fbKeepAliveTimer						: TON;
+	xResetKeepAliveTimer				: BOOL;
+
+	fbCOMtimeout							: TON;
+	tCOMtimeoutValue					: TIME;
+	udiLastState							: UDINT;
+
+	fbTimeoutPINGREQ					: TON;	xAwaitingPINGRESP	: BOOL;
+	fbTimeoutCONNECT					: TON;	xAwaitingCONNACK	: BOOL;
+	fbTimeoutSUBSCRIBE				: TON;	xAwaitingSUBACK	: BOOL;
+	fbTimeoutUNSUBSCRIBE			: TON;	xAwaitingUNSUBACK	: BOOL;
+
+	fbCalculateRemainingLength		: FB_CalculateRemainingLength;
+	fbDecodeRemainingLength			: FB_DecodeRemainingLength;
+
+	iSendIndexCount						: INT;
+
+	bRecvCtrl								: BYTE;
+	xRecvDup								: BOOL;
+	bRecvQoS								: BYTE;
+	xRecvRetain							: BOOL;
+	wRecvPacketIdentifier				: WORD;
+	wSendPacketIdentifier				: WORD := 0;
+	uiRecvTopicLength					: UINT;
+	uiRecvPayloadLength					: UINT;
+	sPublishMessage					: STRING(MQTT_MESSAGE_MAX_LENGTH);
+	sPublishTopic							: STRING(MQTT_TOPIC_MAX_LENGTH);
+	sSubscribeTopic						: STRING(MQTT_TOPIC_MAX_LENGTH);
+	sUnsubscribeTopic					: STRING(MQTT_TOPIC_MAX_LENGTH);
+
+	R_TRIG_Publish						: R_TRIG;
+	R_TRIG_Subscribe					: R_TRIG;
+	R_TRIG_Unsubscribe				: R_TRIG;
+END_VAR
+
+(* @END_DECLARATION := '0' *)
+(* Handle Connection / Disconnection *)
+R_TRIG_Enable(CLK := i_xEnable);		(* Disconnect by setting Enable = FALSE *)
+CASE q_wState OF
+	0,										(* Waiting for Enable = TRUE *)
+	2#1100010010,						(* TCP Socket Creation Timeout, retry if AutoReconnect or wait for Enable *)
+	2#0111100101,						(* TCP Socket closed, wait for Enable *)
+	2#1111100110:						(* Closing TCP Socket Timeout, wait for Enable *)
+	 	tCOMtimeoutValue := t#0ms;		(* Reset COM Timeout *)
+		q_sLog := 'Waiting for Enable = TRUE';
+
+		IF (R_TRIG_Enable.Q OR (i_xEnable AND i_xAutoReconnect AND NOT q_xConnected)) THEN
+			q_xError := FALSE; q_sLog := ' '; q_sLastError := ''; q_sLastReceivedTopic := ''; q_sLastReceivedMessage := '';
+			AC_CreateSocket();
+		END_IF
+
+	(* Create Socket *)
+	2#1100010001:						(* Creating TCP Socket failed, retry until timeout *)
+		AC_CreateSocket();
+
+	(* Connect to TCP Server *)
+	2#0100010001,						(* Connect to TCP Server when creating Socket is successful *)
+	2#1100010101:						(* Connecting to TCP Server failed, retry until succeed or timeout *)
+		AC_ConnectToTCPserver();
+
+	(* Send MQTT CONNECT *)
+	2#0100010101,						(* Send MQTT CONNECT when TCP Socket is connected *)
+	2#1100011001:						(* Send MQTT CONNECT failed, retry until succeed or timeout *)
+		AC_SendConnect();
+
+	(* Send DISCONNECT *)
+	2#1110000010,						(* Send MQTT DISCONNECT on SUBSCRIBE Timeout, SUBACK not received *)
+	2#1110100010,						(* Send MQTT DISCONNECT on UNSUBSCRIBE Timeout, UNSUBACK not received *)
+	2#1111100001:						(* Send MQTT DISCONNECT failed, retry until succeed or timeout *)
+		AC_SendDISCONNECT();
+
+	(* Close Socket *)
+	2#1100010111,						(* Close Socket on 'CONNECT Timeout, CONNACK not received *)
+	2#1000100001,						(* Close Socket on CONNACK Connection Refused *)
+	2#1100010110,						(* Close Socket on TCP Server Connection Timeout *)
+	2#1000110001,						(* Close Socket if received PUBLISH from Broker with QoS 0b11 (protocol violation) *)
+	2#1010010001,						(* Close Socket if received invalid SUBACK Packet Identifier or RC 0x80 *)
+	2#1010110001,						(* Close Socket if received invalid UNSUBACK Packet Identifier *)
+	2#1011010001,						(* Close Socket if received invalid PIGRESP (protocol violation) *)
+	2#1111000010,						(* Close Socket on PINGREQ Timeout *)
+	2#0111100001,						(* Close Socket after sending DISCONNECT successfully *)
+	2#1111100010,						(* Close Socket on DISCONNECT Timeout *)
+	2#1111100101:						(* Close Socket failed, retry until Timeout *)
+		AC_CloseSocket();
+
+	(* IDLE or BUSY *)
+	ELSE
+		IF (NOT i_xEnable) THEN			(* Disconnect by setting Enable = FALSE *)
+			AC_SendDISCONNECT();
+		END_IF
+END_CASE
+
+IF q_xConnected THEN
+	(* MQTT Keep Alive *)
+	AC_KeepAlive();
+
+	(* Handle Client Requests (copy input topic/message in local var in case more than one cycle is needed) *)
+	R_TRIG_Publish(CLK := i_xPublish);				IF R_TRIG_Publish.Q			THEN	sPublishTopic := i_sPublishTopic; sPublishMessage := i_sPublishMessage;	AC_SendPUBLISH();			END_IF
+	R_TRIG_Subscribe(CLK := i_xSubscribe);			IF R_TRIG_Subscribe.Q		THEN	sSubscribeTopic := i_sSubscribeTopic;											AC_SendSUBSCRIBE();		END_IF
+	R_TRIG_Unsubscribe(CLK := i_xUnsubscribe);		IF R_TRIG_Unsubscribe.Q	THEN	sUnsubscribeTopic := i_sUnsubscribeTopic;									AC_SendUNSUBSCRIBE();	END_IF
+
+	(* Handle any incoming MQTT packet *)
+	diRecvResult := SysSockRecv(diSocket := diSocket, pbyBuffer := ADR(abInBuffer), diBufferSize := BUFFER_SIZE+1, diFlags := 0);
+	q_xReceivedMessageNotification := FALSE;
+	IF diRecvResult > 0 THEN
+		bRecvCtrl := SHR(abInBuffer[0], 4);			(* Check Control Packet Type *)
+		CASE bRecvCtrl OF
+			00:	AC_HandleReserved();			(* Reserved *)
+			01:	AC_HandleCONNECT();			(* CONNECT *)
+			02:	AC_HandleCONNACK();			(* CONNACK *)
+			03:	AC_HandlePUBLISH();			(* PUBLISH *)
+			04:	AC_HandlePUBACK();			(* PUBACK *)
+			05:	AC_HandlePUBREC();			(* PUBREC *)
+			06:	AC_HandlePUBREL();			(* PUBREL *)
+			07:	AC_HandlePUBCOMP();			(* PUBCOMP *)
+			08:	AC_HandleSUBSCRIBE();		(* SUBSCRIBE *)
+			09:	AC_HandleSUBACK();			(* SUBACK *)
+			10:	AC_HandleUNSUBSCRIBE();	(* UNSUBSCRIBE *)
+			11:	AC_HandleUNSUBACK();		(* UNSUBACK *)
+			12: AC_HandlePINGREQ();			(* PINGREQ *)
+			13:	AC_HandlePINGRESP();			(* PINGRESP *)
+			14:	AC_HandleDISCONNECT();		(* DISCONNECT *)
+			15:	AC_HandleRESERVED();		(* Reserved *)
+		END_CASE
+	END_IF
+
+	(* Handle MQTT Timeouts *)
+	AC_TimeoutCONNECT();
+	AC_TimeoutPINGREQ();
+	AC_TimeoutSUBSCRIBE();
+	AC_TimeoutUNSUBSCRIBE();
+
+	(* Purge MQTT Control Packet Type from In Buffer on Error *)
+	IF q_xError THEN abInBuffer[0] := 0; END_IF
+END_IF
+
+(* Handle COM Timeouts *)
+fbCOMtimeout(IN := (udiLastState = q_wState) AND (tCOMtimeoutValue > t#0ms), PT := tCOMtimeoutValue);
+udiLastState := q_wState;
+
+(* IDLE state *)
+q_xIDLE := diSendResult <= 0 AND diRecvResult <= 0;
+
+(* Last Error *)
+IF q_xError THEN q_sLastError := q_sLog; END_IF
+END_FUNCTION_BLOCK
+ACTION	AC_CloseSocket:
+(* Close Socket (MQTT Broker Socket)
+---------------------------------------------------
+*)
+
+q_sLog := 'Closing TCP Socket';
+q_wState := 2#0111100100;
+
+(* Close Socket *)
+xResult := SysSockClose(diSocket);
+tCOMtimeoutValue := i_tCommTimeout;	(* Start Timeout *)
+
+(* Success *)
+IF xResult THEN
+	q_xConnected := FALSE;
+	q_sLog := 'TCP Socket closed';
+	q_xError := FALSE;
+	q_wState := 2#0111100101;			(* Next step: Wait for Enable *)
+ELSE
+	q_sLog := 'Closing TCP Socket failed';
+	q_wState := 2#1111100101;			(* Next step: Retry until Timeout *)
+	q_xError := TRUE;
+END_IF
+
+(* Reset MQTT Request Timers (again here in case we close the socket directly without sending MQTT DISCONNECT first) *)
+xAwaitingCONNACK := FALSE;
+xAwaitingPINGRESP := FALSE;
+xAwaitingSUBACK := FALSE;
+xAwaitingUNSUBACK := FALSE;
+
+(* Timeout *)
+IF fbCOMtimeout.Q THEN
+	q_xConnected := FALSE;
+	q_sLog := 'Closing TCP Socket Timeout';
+	q_xError := TRUE;
+	q_wState := 2#1111100110;			(* Next step: Wait for Enable *)
+END_IF
+END_ACTION
+
+ACTION	AC_ConnectToTCPserver:
+(* Connect to TCP Server (MQTT Broker Socket)
+----------------------------------------------------------------
+*)
+
+q_sLog := 'Connecting to TCP Server';
+q_wState := 2#0100010100;
+
+IF (sockAddr.sin_addr = 0) THEN
+	sockAddr.sin_family := SOCKET_AF_INET;
+	IF (RIGHT(i_sBrokerAddress,1) = '0' OR RIGHT(i_sBrokerAddress,1) = '1' OR RIGHT(i_sBrokerAddress,1) = '2' OR RIGHT(i_sBrokerAddress,1) = '3' OR RIGHT(i_sBrokerAddress,1) = '4'
+		OR RIGHT(i_sBrokerAddress,1) = '5' OR RIGHT(i_sBrokerAddress,1) = '6' OR RIGHT(i_sBrokerAddress,1) = '7' OR RIGHT(i_sBrokerAddress,1) = '8' OR RIGHT(i_sBrokerAddress,1) = '9') THEN
+		sockAddr.sin_addr := SysSockInetAddr(i_sBrokerAddress);
+	ELSE
+		(* SysSockInetNtoa(SysSockGetHostByName(ADR(i_sBrokerAddress))., i_sBrokerAddress, 80);
+		sockAddr.sin_addr := SysSockInetAddr(i_sBrokerAddress); *)
+		sockAddr.sin_addr := SysSockNtohl(SysSockGetHostByName(ADR(i_sBrokerAddress)));
+	END_IF
+END_IF
+
+sockAddr.sin_port :=  SysSockHtons(i_uiPort);
+
+(* Connect to Socket *)
+xResult := SysSockConnect(diSocket, ADR(sockAddr), SIZEOF(sockAddr));
+tCOMtimeoutValue := i_tCommTimeout;	(* Start Timeout *)
+
+(* Success *)
+IF xResult THEN
+	iSendIndexCount := 0;			(* Temp. use iSendIndexCount as retry counter *)
+	q_sLog := 'TCP Socket connected';
+	q_xError := FALSE;
+	q_wState := 2#0100010101;		(* Next step: Send CONNECT *)
+
+ELSE
+	q_sLog := 'Connecting to TCP Server failed';
+	iSendIndexCount := iSendIndexCount + 1;
+	IF iSendIndexCount > 3 THEN	(* Trigger error only after 3 failures (connection often fails the first time...) *)
+		q_xError := TRUE;
+	END_IF
+	q_wState := 2#1100010101;		(* Next step: Retry until Succeed or Timeout *)
+END_IF
+
+(* Timeout *)
+IF fbCOMtimeout.Q THEN
+	q_xError := TRUE;
+	q_sLog := 'TCP Server Connection Timeout';
+	tCOMtimeoutValue := t#0ms;		(* Reset COM Timeout *)
+	q_wState := 2#1100010110;		(* Next step: Close Socket *)
+END_IF
+END_ACTION
+
+ACTION	AC_CreateSocket:
+(* Create Socket to (MQTT Broker Socket)
+--------------------------------------------------------
+*)
+
+q_sLog := 'Creating TCP Socket';
+q_wState := 2#0100010000;
+
+(* Create Socket *)
+diSocket := SysSockCreate(SOCKET_AF_INET, SOCKET_STREAM, SOCKET_IPPROTO_TCP);
+tCOMtimeoutValue := i_tCommTimeout;	(* Start Timeout *)
+
+SysSockSetOption(diSocket, SOCKET_IPPROTO_TCP, SOCKET_TCP_NODELAY,  ADR(IoCtlParameter), SIZEOF(IoCtlParameter)); (* Set Push-Bit - HACK for Wago 841 - 881 according to OSCAT *)
+SysSockIoctl(diSocket, SOCKET_FIONBIO, ADR(IoCtlParameter));	(* Send socket to non blocking *)
+
+(* Create Socket successful *)
+IF diSocket > 0 THEN
+	sockAddr.sin_addr := 0;
+	iSendIndexCount := 0;		(* Temp. use iSendIndexCount as 'TCP Socket creation retry counter *)
+	q_sLog := 'TCP Socket created';
+	q_xError := FALSE;
+	q_wState := 2#0100010001;	(* Next step: Connect to TCP Server *)
+
+ELSE
+	q_sLog := 'Creating TCP Socket failed';
+	q_xError := TRUE;
+	q_wState := 2#1100010001;	(* Next step: Retry until Succeed or Timeout *)
+END_IF
+
+(* Timeout *)
+IF fbCOMtimeout.Q THEN
+	q_sLog := 'TCP Socket Creation Timeout';
+	q_xError := TRUE;
+	q_wState := 2#1100010010;	(* Next step: Wait for Enable or Auto Reconnect *)
+END_IF
+END_ACTION
+
+ACTION	AC_HandleCONNACK:
+(* Handle CONNACK Message from Broker
+-----------------------------------------------------------
+
+							Fixed Header								|		Variable Header			|
+							  1 + 1 bytes								|			 2 bytes				|
+Control Packet TYPE	|		Flags		|	Remaining Length	|	Flags		|	return code	|
+					1 byte					|		1 bytes				|	1 byte		|		1 byte		|
+						|	  Reserved		|							|   Res	|   SP	|					|
+		  4 bits			|		4 bits		|							| 7 bits	| 1 bit	|					|
+value:		2			|bin 0	0	0	0	|			2				|	 0	|  0/1	|		  1-5		|
+
+Notes:
+- Remaining Length field: length of the variable header. For the CONNACK Packet this has the value 2.
+- Flags: Bits 7-1 are reserved AND MUST be set TO 0. Bit 0 (SP) is the Session Present Flag.
+*)
+
+q_sLog := 'Received CONNACK from Broker';
+q_wState := 2#0000100000;
+
+(* Check CONNACK return code in Variable Header 2nd Byte*)
+IF abInBuffer[3] = 0 THEN			(* Success *)
+	xAwaitingCONNACK := FALSE;
+	q_xError := FALSE;
+	q_wState := 2#0000100001;	(* Next step: IDLE *)
+
+ELSE								(* Error *)
+	q_sLog := 'Connection Refused';
+	CASE abInBuffer[3] OF
+																		(* 0: Connection Accepted *)
+		1:	CONCAT(q_sLog, ', Unacceptable Protocol Version');	(* 1: Connection Refused, unacceptable protocol version *)
+		2:	CONCAT(q_sLog, ', Identifier Rejected');					(* 2: Connection Refused, identifier rejected *)
+		3:	CONCAT(q_sLog, ', Server Unavailable');				(* 3: Connection Refused, Server unavailable *)
+		4:	CONCAT(q_sLog, ', Bad Username or Password');		(* 4: Connection Refused, bad Username or passworrd *)
+		5:	CONCAT(q_sLog, ', Not Autorized');						(* 5: Connection Refused, not autorized *)
+																		(* 6-255: Reserved for future use *)
+	END_CASE
+	q_xError := TRUE;
+	q_wState := 2#1000100001;	(* Next step: Close Socket *)
+END_IF
+diRecvResult := 0;
+END_ACTION
+
+ACTION	AC_HandleCONNECT:
+(* Handle CONNECT Message from Broker
+-----------------------------------------------------------
+*)
+
+(* CONNECT unsupported since it is an MQTT Client only (not a Broker) *)
+q_sLog := 'Received CONNECT from Broker: unsupported since I`m only an MQTT Client';
+q_xError := TRUE;
+q_wState := 2#1000011000;	(* Next Step: IDLE *)
+diRecvResult := 0;
+END_ACTION
+
+ACTION	AC_HandleDISCONNECT:
+(* Handle DISCONNECT Message from Broker
+----------------------------------------------------------------
+*)
+
+(* DISCONNECT unsupported since it is an MQTT Client only (not a Broker) *)
+q_sLog := 'Received DISCONNECT from Broker: unsupported since I`m only an MQTT Client';
+q_xError := TRUE;
+q_wState := 2#1011100000;	(* Next Step: IDLE *)
+diRecvResult := 0;
+END_ACTION
+
+ACTION	AC_HandlePINGREQ:
+(* Handle PINGREQ Message from Broker
+----------------------------------------------------------
+*)
+
+(* PINGREQ unsupported since it is an MQTT Client only (not a Broker) *)
+q_sLog := 'Received PINGREQ from Broker: unsupported since I`m only an MQTT Client';
+q_xError := TRUE;
+q_wState := 2#1011000010;	(* Next Step: IDLE *)
+diRecvResult := 0;
+END_ACTION
+
+ACTION	AC_HandlePINGRESP:
+(* Handle PINGRESP Message from Broker
+------------------------------------------------------------
+
+							Fixed Header								|
+							     2 bytes									|
+Control Packet Type	|		Flags		|	Remaining Length	|
+					 1 byte					|			1 byte			|
+						|	  Reserved		|							|
+			4 bits		|		4 bits		|							|
+value:		 13			|bin 0	0	0	0	|			   0				|
+
+Notes:
+- A PINGRESP Packet is sent by the Server to the Client in response to a PINGREQ Packet. It indicates that the Server is alive.
+- The Server MUST send a PINGRESP Packet in response to a PINGREQ Packet [MQTT-3.12.4-1].
+- This Packet is used in Keep Alive processing.
+- Keep Alive: It is the maximum time interval that is permitted to elapse between the point at which the Client finishes transmitting one Control Packet and the point it starts sending the next.
+	It is the responsibility of the Client to ensure that the interval between Control Packets being sent does not exceed the Keep Alive value. In the absence of sending any other Control Packets, the Client MUST send a PINGREQ Packet [MQTT-3.1.2-23].
+- If a Client does not receive a PINGRESP Packet within a reasonable amount of time after it has sent a PINGREQ, it SHOULD close the Network Connection to the Server.
+*)
+
+q_sLog := 'Received PINGRESP from Broker';
+q_wState := 2#0011010000;
+
+(* PINGRESP OK *)
+IF abInBuffer[1] = 0 THEN
+	xAwaitingPINGRESP := FALSE;
+	xResetKeepAliveTimer := TRUE;
+	q_xError := FALSE;
+	q_wState := 2#0011010001;	(* Next Step: IDLE *)
+
+ELSE
+	q_sLog := 'Received invalid PINGRESP from Broker';
+	q_xError := TRUE;
+	q_wState := 2#1011010001;	(* Next Step: Close Soket since this is a protocol violation *)
+END_IF
+diRecvResult := 0;
+END_ACTION
+
+ACTION	AC_HandlePUBACK:
+(* Handle PUBACK Message from Broker
+--------------------------------------------------------
+*)
+
+(* PUBACK unsupported since only QoS 0 is supported *)
+q_sLog := 'Received PUBACK from Broker: rejected since QoS 0 only is supported yet';
+q_xError := TRUE;
+q_wState := 2#1001000001;	(* Next Step: IDLE *)
+diRecvResult := 0;
+END_ACTION
+
+ACTION	AC_HandlePUBCOMP:
+(* Handle PUBCOMP Message from Broker
+-----------------------------------------------------------
+*)
+
+(* PUBCOMP unsupported since only QoS 0 is supported *)
+q_sLog := 'Received PUBCOMP from Broker: rejected since QoS 0 only is supported yet';
+q_xError := TRUE;
+q_wState := 2#1001110001;	(* Next Step: IDLE *)
+diRecvResult := 0;
+END_ACTION
+
+ACTION	AC_HandlePUBLISH:
+(* Handle PUBLISH Message from Broker
+---------------------------------------------------------
+
+							Fixed Header									|						Variable Header						|		Payload		|
+							1 + 1-4 bytes									|						    variable size						|	   variable size		|
+Control Packet Type	|		  Flags			|	Remaining Length	| Topic Length	|	Topic Name	|	Packet Identifier		|						|
+					 1 byte						|		1-4 bytes			|	2 bytes		|					| 0 | 2 bytes (if QoS > 0)	|						|
+						|  DUP	|  QoS	|Retain|							|  MSB	|  LSB	|					|	MSB	|	LSB		|						|
+			4 bits		| 1 bit	| 2 bits	|  1 bit	|							| 1 byte	| 1 byte	|					|    1 byte	|    1 byte		|						|
+value:		    3			|   0/1	| 0,1,2	|    0/1	|length VarHead+Payload	|	1-65536	|		UTF8		|		 0-65536			|		  UTF8			|
+
+Notes:
+- The DUP flag MUST be set to 1 by the Client or Server when it attempts to re-deliver a PUBLISH Packet [MQTT-3.3.1.-1]. The DUP flag MUST be set to 0 for all QoS 0 messages [MQTT-3.3.1-2].
+- The value of the DUP flag from an incoming PUBLISH packet is not propagated when the PUBLISH Packet is sent to subscribers by the Server.
+  The DUP flag in the outgoing PUBLISH packet is set independently to the incoming PUBLISH packet, its value MUST be determined solely by whether the outgoing PUBLISH packet is a retransmission [MQTT-3.3.1-3].
+- The receiver of a PUBLISH Packet MUST respond according to QoS.
+- QoS 0 => None, QoS 1 => PUBACK Packet, QoS 2 => PUBREC Packet.
+- When sending a PUBLISH Packet to a Client the Server MUST set the RETAIN flag to 1 if a message is sent as a result of a new subscription being made by a Client [MQTT-3.3.1-8].
+  It MUST set the RETAIN flag to 0 when a PUBLISH Packet is sent to a Client because it matches an established subscription regardless of how the flag was set in the message it received [MQTT-3.3.1-9]. 
+- The Payload contains the Application Message that is being published. It is valid for a PUBLISH Packet to contain a zero length payload.
+- A PUBLISH Packet MUST NOT have both QoS bits set to 1. If a Server or Client receives a PUBLISH Packet which has both QoS bits set to 1 it MUST close the Network Connection [MQTT-3.3.1-4].
+*)
+
+(* for future use *)
+xRecvDup		:= (SHR(abInBuffer[0], 3) AND 2#1) > 0;	(* Received SUP: The DUP flag MUST be set to 0 for all QoS 0 messages *)
+bRecvQoS		:=  SHR(abInBuffer[0], 1) AND 2#11;		(* Received QoS: should be 0 *)
+xRecvRetain	:= 		 (abInBuffer[0] AND 2#1) > 0;	(* Received Reatain flag *)
+
+q_sLog := CONCAT('Received PUBLISH from Broker (d', BYTE_TO_STRING(BOOL_TO_BYTE(xRecvDup)));
+q_sLog := CONCAT(CONCAT(q_sLog, ', q'), BYTE_TO_STRING(bRecvQoS));
+q_sLog := CONCAT(CONCAT(CONCAT(q_sLog, ', r'), BYTE_TO_STRING(BOOL_TO_BYTE(xRecvRetain))), ')');
+q_wState := 2#0000110000;
+
+IF bRecvQoS = 0 (* AND xDup = FALSE *) THEN	(* Ensure QoS = 0 *)
+	(* Remaining length: Number of bytes left within current packet, including variable header plus payload. *)
+	fbDecodeRemainingLength(pabRemainingLengthBytes := ADR(abInBuffer[1]));
+
+	uiRecvTopicLength :=																								(* Fixed Header Length = 1 + fbDecodeRemainingLength.iRemainingLengthLength;*)
+		SHL(	BYTE_TO_UINT(abInBuffer[1 + fbDecodeRemainingLength.iRemainingLengthLength]), 8)		(* Topic Length MSB *)
+		+		BYTE_TO_UINT(abInBuffer[1 + fbDecodeRemainingLength.iRemainingLengthLength + 1]);		(* Topic Length LSB *)
+
+	(* The length of the payload can be calculated by subtracting the length of the variable header from the Remaining Length field that is in the Fixed Header. *)
+	uiRecvPayloadLength := fbDecodeRemainingLength.uiRemainingLength - (2 + uiRecvTopicLength + 0);	(* Variable Header Length = 2 + Topic Length + 0-2 (depending on QoS)*)
+
+	(* Topic *)
+	MemSet(ADR(q_sLastReceivedTopic), 0, MQTT_TOPIC_MAX_LENGTH);
+	MemMove(ADR(abInBuffer[1 + fbDecodeRemainingLength.iRemainingLengthLength + 2]), ADR(q_sLastReceivedTopic), MIN(uiRecvTopicLength, MQTT_TOPIC_MAX_LENGTH));	(* Security: MQTT_TOPIC_MAX_LENGTH *)
+
+	(* Payload *)
+	MemSet(ADR(q_sLastReceivedMessage), 0, MQTT_MESSAGE_MAX_LENGTH);
+	MemMove(ADR(abInBuffer[1 + fbDecodeRemainingLength.iRemainingLengthLength + 2 + uiRecvTopicLength]), ADR(q_sLastReceivedMessage), MIN(uiRecvPayloadLength, MQTT_MESSAGE_MAX_LENGTH));	(* Security: MQTT_MESSAGE_MAX_LENGTH *)
+
+	q_xReceivedMessageNotification := TRUE;
+	q_xError := FALSE;
+	q_wState := 2#0000110001;	(* Next Step: IDLE *)
+
+(* A PUBLISH Packet MUST NOT have both QoS bits set to 1. If a Server or Client receives a PUBLISH Packet which has both QoS bits set to 1 it MUST close the Network Connection [MQTT-3.3.1-4]. *)
+ELSIF bRecvQoS = 2#11 THEN
+	q_sLog := CONCAT(q_sLog, ': QoS protocol violation');
+	q_xError := TRUE;
+	q_wState := 2#1000110001;	(* Next Step: Close Socket *)
+
+ELSE
+	q_sLog := CONCAT(q_sLog, ': rejected since QoS 0 only is supported yet');
+	q_xError := TRUE;
+	q_wState := 2#1000110000;	(* Next Step: IDLE *)
+END_IF
+diRecvResult := 0;
+END_ACTION
+
+ACTION	AC_HandlePUBREC:
+(* Handle PUBREC Message from Broker
+---------------------------------------------------------
+*)
+
+(* PUBREC unsupported since only QoS 0 is supported *)
+q_sLog := 'Received PUBREC from Broker: rejected since QoS 0 only is supported yet';
+q_xError := TRUE;
+q_wState := 2#1001010001;	(* Next Step: IDLE *)
+diRecvResult := 0;
+END_ACTION
+
+ACTION	AC_HandlePUBREL:
+(* Handle PUBREL Message from Broker
+--------------------------------------------------------
+*)
+
+(* PUBREL unsupported since only QoS 0 is supported *)
+q_sLog := 'Received PUBREL from Broker: rejected since QoS 0 only is supported yet';
+q_xError := TRUE;
+q_wState := 2#1001100001;	(* Next Step: IDLE *)
+diRecvResult := 0;
+END_ACTION
+
+ACTION	AC_HandleRESERVED:
+(* Handle reserved or undefined MQTT Control Packet Type Message from Broker
+---------------------------------------------------------------------------------------------------------------
+*)
+
+(* reject any reserved or undefined MQTT Control Packet Type *)
+q_sLog := 'Received RESERVED MQTT Control Packet Type from Broker';
+q_xError := TRUE;
+q_wState := 2#1000000001;
+q_wState := q_wState + SHL(bRecvCtrl, 4);	(* Next Step: IDLE *)
+diRecvResult := 0;
+END_ACTION
+
+ACTION	AC_HandleSUBACK:
+(* Handle SUBACK Message from Broker
+--------------------------------------------------------
+
+									Fixed Header								|	Variable Header	|		    Payload			|
+									   1 + 1 bytes								|		  2 bytes		|		   1-X bytes			|
+Control Packet Type	|		Flags		|		Remaining Length		|	Packet Identifier	|		return codes		|
+					1 byte					|				1 byte				|	1 byte	|	1 byte	|							|
+						|	   Reserved	|									|	MSB	|	LSB	|							|
+			4 bits		|		4 bits		|									|			|			|							|
+value:		    9			|bin 0	0	0	0	| length VarHead+Payload(=3?)	|	0-255	|	0-255	| 0x00, 0x01, 0x02 or 0x80	|
+
+Notes:
+- The variable header contains the Packet Identifier from the SUBSCRIBE Packet that is being acknowledged.
+- The SUBACK Packet sent by the Server to the Client MUST contain a return code for each Topic Filter/QoS pair. This return code MUST either show the maximum QoS that was granted for that Subscription or indicate that the subscription failed [MQTT-3.8.4-5].
+- The Server might grant a lower maximum QoS than the subscriber requested. The QoS of Payload Messages sent in response to a Subscription MUST be the minimum of the QoS of the originally published message and the maximum QoS granted by the Server.
+- The payload contains a list of return codes. Each return code corresponds to a Topic Filter in the SUBSCRIBE Packet being acknowledged. SUBACK return codes other than 0x00, 0x01, 0x02 and 0x80 are reserved and MUST NOT be used.
+- The Server is permitted to start sending PUBLISH packets matching the Subscription before the Server sends the SUBACK Packet.
+*)
+
+q_sLog := 'Received SUBACK from Broker';
+q_wState := 2#0010010000;
+
+wRecvPacketIdentifier :=	SHL(	BYTE_TO_UINT(abInBuffer[2]), 8)	(* Packet Identifier MSB *)
+							+		BYTE_TO_UINT(abInBuffer[3]);		(* Packet Identifier LSB *)
+
+(* Success *)
+IF wRecvPacketIdentifier = wSendPacketIdentifier						(* The variable header contains the Packet Identifier from the SUBSCRIBE Packet that is being acknowledged. *)
+AND abInBuffer[diRecvResult-1] < 16#80 THEN							(* should = 0x00 for QoS 0, 0x80 = error *)
+	xAwaitingSUBACK := FALSE;
+	xResetKeepAliveTimer := TRUE;
+	q_xError := FALSE;
+	q_wState := 2#0010010001;	(* Next Step: IDLE *)
+
+(* Error *)
+ELSE
+	IF abInBuffer[diRecvResult-1] = 16#80 THEN
+		q_sLog := 'SUBACK message reported failure (RC=0x80)';
+	ELSE
+		q_sLog := 'Received invalid SUBACK message';
+	END_IF
+	q_xError := TRUE;
+	q_wState := 2#1010010001;	(* Close Socket *)
+END_IF
+diRecvResult := 0;
+END_ACTION
+
+ACTION	AC_HandleSUBSCRIBE:
+(* Handle SUBSCRIBE Message from Broker
+--------------------------------------------------------------
+*)
+
+(* SUBSCRIBE unsupported since it is an MQTT Client only (not a Broker) *)
+q_sLog := 'Received SUBSCRIBE from Broker: unsupported since I`m only an MQTT Client';
+q_xError := TRUE;
+q_wState := 2#1010000000;	(* Next Step: IDLE *)
+diRecvResult := 0;
+END_ACTION
+
+ACTION	AC_HandleUNSUBACK:
+(* Handle UNSUBACK Message from Broker
+-------------------------------------------------------------
+
+								Fixed Header							|	Variable Header	|
+								   1 + 1 bytes							|		  2 bytes		|
+Control Packet Type	|		Flags		|	Remaining Length	|	Packet Identifier	|
+					1 byte					|			1 byte			|	1 byte	|	1 byte	|
+						|	   Reserved	|							|	MSB	|	LSB	|
+			4 bits		|		4 bits		|							|			|			|
+value:		  11			|bin 0	0	0	0	|	length VarHead(=2)	|	0-255	|	0-255	|
+
+Notes:
+- The variable header contains the Packet Identifier of the UNSUBSCRIBE Packet that is being acknowledged.
+- The UNSUBACK Packet has no payload.
+- A Client could also receive messages while an UNSUBSCRIBE operation is in progress.
+*)
+
+q_sLog := 'Received UNSUBACK from Broker';
+q_wState := 2#0010110000;
+
+wRecvPacketIdentifier :=	SHL(	BYTE_TO_UINT(abInBuffer[2]), 8)	(* Packet Identifier MSB *)
+							+		BYTE_TO_UINT(abInBuffer[3]);		(* Packet Identifier LSB *)
+
+(* Success *)
+IF wRecvPacketIdentifier = wSendPacketIdentifier THEN				(* The variable header contains the Packet Identifier of the UNSUBSCRIBE Packet that is being acknowledged. *)
+	xAwaitingUNSUBACK := FALSE;
+	xResetKeepAliveTimer := TRUE;
+	q_xError := FALSE;
+	q_wState := 2#0010110001;	(* Next Step: IDLE *)
+
+(* Error *)
+ELSE
+	q_sLog := 'Received invalid UNSUBACK Packet Identifier';
+	q_xError := TRUE;
+	q_wState := 2#1010110001;	(* Close Socket *)
+END_IF
+diRecvResult := 0;
+END_ACTION
+
+ACTION	AC_HandleUNSUBSCRIBE:
+(* Handle UNSUBSCRIBE Message from Broker
+------------------------------------------------------------------
+*)
+
+(* UNSUBSCRIBE unsupported since it is an MQTT Client only (not a Broker) *)
+q_sLog := 'Received UNSUBSCRIBE from Broker: unsupported since I`m only an MQTT Client';
+q_xError := TRUE;
+q_wState := 2#1010100000;	(* Next Step: IDLE *)
+diRecvResult := 0;
+END_ACTION
+
+ACTION	AC_KeepAlive:
+(* Keep Alive
+-----------------
+
+- A Keep Alive value of zero (0) has the effect of turning off the keep alive mechanism. This means that, in this case, the Server is not required to disconnect the Client on the grounds of inactivity.
+- Note that a Server is permitted to disconnect a Client that it determines to be inactive or non-responsive at any time, regardless of the Keep Alive value provided by that Client.
+- If the Keep Alive value is non-zero and the Server does not receive a Control Packet from the Client within one and a half times the Keep Alive time period, it MUST disconnect the Network Connection to the Client as if the network had failed [MQTT-3.1.2-24].
+- Keep Alive maximum time interval is 18 hours 12 minutes and 15 seconds
+*)
+
+IF i_tKeepAliveTimeInterval > t#18h12m15s THEN
+	i_tKeepAliveTimeInterval := t#18h12m15s;
+	q_sLog := 'Invalid Keep Alive Time Interval defined. Set to max value 18h12m15s';
+	q_xError := TRUE;
+	q_wState := 2#1111000000;
+END_IF
+
+fbKeepAliveTimer(IN := NOT xResetKeepAliveTimer AND (i_tKeepAliveTimeInterval > t#0s), PT := i_tKeepAliveTimeInterval);
+xResetKeepAliveTimer := FALSE;		(* Keep Alive timer should run when IDLE *)
+
+(* Keep Alive timeout reached and no ongoing send request *)
+IF fbKeepAliveTimer.Q AND diSendResult <= 0 THEN
+	AC_SendPINGREQ();				(* Send PINGREQ to Broker *)
+END_IF
+END_ACTION
+
+ACTION	AC_SendCONNECT:
+(* Send CONNECT to Broker
+---------------------------------------
+
+								Fixed Header								|														Variable Header													|																	Payload																|
+								1 + 1-4 bytes								|															10 bytes														|																      3-X bytes																|
+Control Packet Type	|		Flags		|		Remaining Length	|	Length		|		Protocol Name		| Level	|					Connect Flags				|   Keep Alive	|		Client Identifier		|		Will Topic			|	Will Message			| User Name	|			Password				|
+					1 byte					|			1-4 bytes			| 	 2 bytes	| 			4 bytes				| 1 byte	|						1 byte						| 	2 bytes		|2 bytes length	|   1-23* bytes	|   0/2b length	| 0-X bytes	|   0/2b length	| 0-X bytes	|	0-X bytes	|   0/2b length	| 0-65535 bytes	|
+						|	   Reserved	|								|  MSB	|  LSB	|	M	|	Q	|	T	|	T	|		|   UF |   PF  |  WR |   Will QoS	|  WF  |  CS  | Res	|  MSB	|  LSB	|  MSB	|  LSB	|	   UTF8		|  MSB	|  LSB	|	UTF8	|  MSB	|  LSB	|	UTF8?	|	UTF8		|  MSB	|  LSB	|	  binary			|
+			4 bits		|		4 bits		|								| 1 byte	| 1 byte	| 1 byte	| 1 byte	| 1 byte	| 1 byte	|		| 1 bit | 1 bit | 1 bit |	      2 bits	| 1 bit | 1 bit | 1 bit	| 1 byte	| 1 byte	| 1 byte	| 1 byte	|				| 1 byte	| 1 byte	|			| 1 byte	| 1 byte	|			|				| 1 byte	| 1 byte	|					|
+value:		   1			|bin 0	0	0	0	|	length VarHead+Payload	|	0	|	4	|    77	|    81	|    84	|    84	|    4	|												0	|		|		|		|		|				|		|		|			|		|		|			|				|		|		|					|
+
+Notes:
+- After a Network Connection is established by a Client to a Server, the first Packet sent from the Client to the Server MUST be a CONNECT Packet.
+- A Client can only send the CONNECT Packet once over a Network Connection. The Server MUST process a second CONNECT Packet sent from a Client as a protocol violation and disconnect the Client [MQTT-3.1.0-2].
+- Remaining Length is the length of the variable header (10 bytes) plus the length of the Payload.
+- The variable header FOR the CONNECT Packet consists OF 4 fields in the following order: Protocol Name, Protocol Level, Connect Flags, AND Keep Alive.
+- Protocol Level: The 8 bit unsigned value that represents the revision level of the protocol used by the Client. The value of the Protocol Level field for the version 3.1.1 of the protocol is 4 (0x04).
+- Connect Flags: The Connect Flags byte contains a number of parameters specifying the behavior of the MQTT connection. It also indicates the presence or absence of fields in the payload.
+	- Clean Session (CS): If CleanSession is set to 0, the Server MUST resume communications with the Client based on state from the current Session (as identified by the Client identifier).
+		If there is no Session associated with the Client identifier the Server MUST create a new Session. If CleanSession is set to 1, the Client and Server MUST discard any previous Session and start a new one. This Session lasts as long as the Network Connection.
+	- Will Flag (WF): If the Will Flag is set to 1 this indicates that, if the Connect request is accepted, a Will Message MUST be stored on the Server and associated with the Network Connection.
+		If the Will Flag is set to 1, the Will QoS and Will Retain fields in the Connect Flags will be used by the Server, and the Will Topic and Will Message fields MUST be present in the payload.
+		If the Will Flag is set to 0 the Will QoS and Will Retain fields in the Connect Flags MUST be set to zero and the Will Topic and Will Message fields MUST NOT be present in the payload.
+	- Will QoS: These two bits specify the QoS level to be used when publishing the Will Message. If the Will Flag is set to 0, then the Will QoS MUST be set to 0 (0x00). If the Will Flag is set to 1, the value of Will QoS can be 0 (0x00), 1 (0x01), or 2 (0x02). It MUST NOT be 3 (0x03).
+	- Will Retain (WR): This bit specifies if the Will Message is to be Retained when it is published. If the Will Flag is set to 0, then the Will Retain Flag MUST be set to 0.
+	- Password Flag (PF): If the Password Flag is set to 0, a password MUST NOT be present in the payload. If the Password Flag is set to 1, a password MUST be present in the payload. If the User Name Flag is set to 0, the Password Flag MUST be set to 0.
+	- User Name Flag (UF): If the User Name Flag is set to 0, a user name MUST NOT be present in the payload. If the User Name Flag is set to 1, a user name MUST be present in the payload.
+. Keep Alive: the Keep Alive is a time interval measured in seconds. The maximum value is 18 hours 12 minutes and 15 seconds.
+	Expressed as a 16-bit word, it is the maximum time interval that is permitted to elapse between the point at which the Client finishes transmitting one Control Packet and the point it starts sending the next.
+	It is the responsibility of the Client to ensure that the interval between Control Packets being sent does not exceed the Keep Alive value. In the absence of sending any other Control Packets, the Client MUST send a PINGREQ Packet.
+	A Keep Alive value of 0 has the effect of turning off the keep alive mechanism. This means that, in this case, the Server is not required to disconnect the Client on the grounds of inactivity.
+	Note that a Server is permitted to disconnect a Client that it determines to be inactive or non-responsive at any time, regardless of the Keep Alive value provided by that Client.
+- Payload: it contains one or more length-prefixed fields, whose presence is determined by the flags in the variable header. These fields, if present, MUST appear in the order Client Identifier, Will Topic, Will Message, User Name, Password
+	- Client Identifier: each Client connecting to the Server has a unique ClientId. The ClientId MUST be present and MUST be the first field in the CONNECT packet payload.
+		The Server MUST allow ClientIds which are between 1 and 23 UTF-8 encoded bytes in length, and that contain only the characters "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".
+		* The Server MAY allow ClientId’s that contain more than 23 encoded bytes. The Server MAY allow ClientId’s that contain characters not included in the list given above.
+		If the Client supplies a zero-byte ClientId, the Client MUST also set CleanSession to 1.
+		If the Client supplies a zero-byte ClientId with CleanSession set to 0, the Server MUST respond to the CONNECT Packet with a CONNACK return code 0x02 (Identifier rejected) and then close the Network Connection.
+		If the Server rejects the ClientId it MUST respond to the CONNECT Packet with a CONNACK return code 0x02 (Identifier rejected) and then close the Network Connection.
+*)
+
+q_sLog := 'Sending CONNECT to MQTT Broker';
+q_wState := 2#0100011000;
+
+(* Purge Out Buffer *)
+FOR iSendIndexCount := 0 TO BUFFER_SIZE DO abOutBuffer[iSendIndexCount] := 0; END_FOR
+
+(* Fixed Header *)
+(* MQTT Control Packet Type *)
+abOutBuffer[0] := 2#00010000;	(* 1 = CONNECT *)
+
+(* Calculate the Remaining Length: Length Variable Header + Length Payload *)
+fbCalculateRemainingLength(wNumberOfBytes := 10 +																			(* Variable Header length (always 10) *)
+														(2 + 8)							* BOOL_TO_INT(i_sClientIdentifier = '') +	(* Client Identifier length in case of random generated *)
+														(2 + LEN(i_sClientIdentifier))	* BOOL_TO_INT(i_sClientIdentifier <> '') +	(* Client Identifier length in case defined as input *)
+														(2 + LEN(i_sUsername))		* BOOL_TO_INT(i_sUsername <> '') +		(* User Name length *)
+														(2 + LEN(i_sPassword))		* BOOL_TO_INT(i_sPassword <> '') +		(* Password length *)
+														(2 + LEN(i_sWillTopic))		* BOOL_TO_INT(i_sWillTopic <> '') +			(* Will Topic length *)
+														(2 + LEN(i_sWillMessage))	* BOOL_TO_INT(i_sWillMessage <> ''));		(* Will Message length *)
+
+FOR iSendIndexCount := 1 TO fbCalculateRemainingLength.iRemainingLengthLength DO
+	abOutBuffer[iSendIndexCount] := fbCalculateRemainingLength.abRemainingLengthBytes[iSendIndexCount - 1];
+END_FOR
+
+(* Variable Header *)
+												abOutBuffer[iSendIndexCount] := 0;		(* Variable Header Length MSB (0) *)
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := 4;		(* Variable Header Length LSB (1) *)
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := 77;		(* 'M' *)
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := 81;		(* 'Q' *)
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := 84;		(* 'T' *)
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := 84;		(* 'T' *)
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := 4;		(* The value of the Protocol Level field for the version 3.1.1 of the protocol is 4 (0x04). *)
+
+(* Connect Flags *)
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := 0
+												OR (BOOL_TO_BYTE(i_sUsername <> '')	*	2#10000000)	(* User Name Flag *)
+												OR (BOOL_TO_BYTE(i_sPassword <> '')	*	2#01000000)	(* Password Flag *)
+												OR (BOOL_TO_BYTE(i_xWillRetain)			*	2#00100000)	(* Will Retain *)
+																								(*	2#000XX000*)	(* Will QoS *)
+												OR (BOOL_TO_BYTE(i_sWillTopic <> '')		*	2#00000100)	(* Will Flag *)
+												OR (BOOL_TO_BYTE(i_xCleanSession)	*	2#00000010);	(* Clean Session *)
+																								(*	2#00000000*)	(* Reserved *)
+(* Keep Alive*)
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := WORD_TO_BYTE(SHR(TIME_TO_WORD(i_tKeepAliveTimeInterval), 8));	(* Keep Alive MSB *)
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := WORD_TO_BYTE(TIME_TO_WORD(i_tKeepAliveTimeInterval));			(* Keep Alive LSB *)
+
+(* Client Identifier *)
+IF i_sClientIdentifier = '' THEN
+	(* A Client implementation could provide a convenience method to generate a random ClientId. Use of such a method should be actively discouraged when the CleanSession is set to 0. *)
+	IF i_xCleanSession = FALSE THEN
+		q_sLog := 'Random Client Id should be actively discouraged when the CleanSession is set to 0';
+		q_xError := TRUE;
+		q_wState := 2#1100010100;	(* just continue here *)
+	END_IF
+
+	(* Random Client Identifier in case not defined *)
+	dwTime := TIME_TO_DWORD(TIME());
+	fbRandom[1](A := 21345,B := 36215,V := dwTime);
+	fbRandom[2](A := 42784,B := 926432,V := dwTime);
+	fbRandom[3](A := 87654,B := 23456,V := dwTime);
+	fbRandom[4](A := 76543,B := 12345,V := dwTime);
+	fbRandom[5](A := 3456543234,B := 54321234,V := dwTime);
+	fbRandom[6](A := 763435,B := 121234,V := dwTime);
+	fbRandom[7](A := 897,B := 434321,V := dwTime);
+	fbRandom[8](A := 345654332,B := 77765,V := dwTime);
+
+	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := 0;														(* Random ClientId length MSB *)
+	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := 8;														(* Random ClientId length LSB *)
+	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := DWORD_TO_BYTE(fbRandom[1].dwRandom);
+	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := DWORD_TO_BYTE(fbRandom[2].dwRandom);
+	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := DWORD_TO_BYTE(fbRandom[3].dwRandom);
+	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := DWORD_TO_BYTE(fbRandom[4].dwRandom);
+	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := DWORD_TO_BYTE(fbRandom[5].dwRandom);
+	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := DWORD_TO_BYTE(fbRandom[6].dwRandom);
+	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := DWORD_TO_BYTE(fbRandom[7].dwRandom);
+	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := DWORD_TO_BYTE(fbRandom[8].dwRandom);
+ELSE
+	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := 0;														(* Given ClientId length MSB (always 0 since i_sClientIdentifier is always less than 23 chars length) *)
+	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(i_sClientIdentifier));				(* Given ClientId length LSB *)
+	iSendIndexCount := iSendIndexCount + 1;	MemMove(ADR(i_sClientIdentifier), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sClientIdentifier));
+	iSendIndexCount := iSendIndexCount + LEN(i_sClientIdentifier) - 1;
+END_IF
+
+(* Will Topic *)
+IF i_sWillTopic <> '' THEN
+	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(SHR(LEN(i_sWillTopic), 8));			(* Will Topic length MSB *)
+	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(i_sWillTopic));					(* Will Topic length LSB *)
+	iSendIndexCount := iSendIndexCount + 1;	MemMove(ADR(i_sWillTopic), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sWillTopic));
+	iSendIndexCount := iSendIndexCount + LEN(i_sWillTopic) - 1;
+END_IF
+
+(* Will Message *)
+IF i_sWillMessage <> '' THEN
+	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(SHR(LEN(i_sWillMessage), 8));		(* Will Message length MSB *)
+	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(i_sWillMessage));				(* Will Message length LSB *)
+	iSendIndexCount := iSendIndexCount + 1;	MemMove(ADR(i_sWillMessage), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sWillMessage));
+	iSendIndexCount := iSendIndexCount + LEN(i_sWillMessage) - 1;
+END_IF
+
+(* User Name *)
+IF i_sUsername <> '' THEN
+	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(SHR(LEN(i_sUsername), 8));		(* User Name length MSB *)
+	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(i_sUsername));					(* User Name length LSB *)
+	iSendIndexCount := iSendIndexCount + 1;	MemMove(ADR(i_sUsername), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sUsername));
+	iSendIndexCount := iSendIndexCount + LEN(i_sUsername) - 1;
+END_IF
+
+(* Password *)
+IF i_sPassword <> '' THEN
+	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(SHR(LEN(i_sPassword), 8));		(* Password length MSB *)
+	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(i_sPassword));					(* Password length LSB *)
+	iSendIndexCount := iSendIndexCount + 1;	MemMove(ADR(i_sPassword), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sPassword));
+	iSendIndexCount := iSendIndexCount + LEN(i_sUsername) - 1;
+END_IF
+
+(* Send CONNECT *)
+iSendIndexCount := iSendIndexCount + 1;	(* +1 because abOutBuffer is 0 based *)
+diSendResult := SysSockSend(diSocket, ADR(abOutBuffer), iSendIndexCount, 0);
+xAwaitingCONNACK := TRUE;				(* This starts the dedicated CONNECT timer, awaiting for CONNACK response *)
+
+(* Send CONNECT successful *)
+IF diSendResult = iSendIndexCount THEN
+	q_xConnected := TRUE;					(* If CONNECT request sent successfully, we can expect to be connected. If CONNACK is unsuccessfull, q_xConnected will be set to false again after timeout is reached. It is allowed to send PUBLISH before getting CONNACK. *)
+	tCOMtimeoutValue := t#0ms;				(* Stop any COM Timeout if connected, CONNECT timeout is running now. *)
+	FOR iSendIndexCount := 0 TO BUFFER_SIZE DO abInBuffer[iSendIndexCount] := 0; END_FOR	(* Purge In Buffer on connection *)
+	q_sLog := 'Sending CONNECT successfully, waiting for CONNACK from Broker';
+	q_xError := FALSE;
+	q_wState := 2#0100011001;				(* Next Step: Wait for CONNACK from Broker. COM timeout is reset when IDLE. CONNACK Timeout handled by dedicated CONNACK timeout. *)
+
+(* Send CONNECT failed *)
+ELSE
+	q_sLog := 'Sending CONNECT failed';
+	q_xError := TRUE;
+	q_wState := 2#1100011001;				(* Next Step: Do not close the connection yet. It will be retried. And if Timeout is reached by not receiving CONNACK, the connection will be closed. *)
+END_IF
+diSendResult := 0;
+END_ACTION
+
+ACTION	AC_SendDISCONNECT:
+(* Send DISCONNECT to Broker
+--------------------------------------------
+
+							Fixed Header								|
+								2 bytes									|
+Control Packet Type	|		Flags		|	Remaining Length	|
+					 1 byte					|			1 byte			|
+						|	   Reserved	|							|
+			4 bits		|		4 bits		|							|
+value:		  14		|bin 0	0	0	0	|			   0				|
+
+Notes:
+- The DISCONNECT Packet is the final Control Packet sent from the Client to the Server. It indicates that the Client is disconnecting cleanly.
+- After sending a DISCONNECT Packet the Client:
+	MUST close the Network Connection [MQTT-3.14.4-1].
+	MUST NOT send any more Control Packets on that Network Connection [MQTT-3.14.4-2].
+*)
+
+q_sLog := 'Sending DISCONNECT to MQTT Broker';
+q_wState := 2#0111100000;
+
+(* Purge Out Buffer *)
+FOR iSendIndexCount := 0 TO BUFFER_SIZE DO abOutBuffer[iSendIndexCount] := 0; END_FOR
+
+(* Fixed Header *)
+(* MQTT Control Packet Type *)
+abOutBuffer[0] := 2#11100000;			(* 14 = DISCONNECT *)
+abOutBuffer[1] := 0;						(* Remaining Length always 0 for DISCONNECT *)
+
+(* Send DISCONNECT *)
+diSendResult := SysSockSend(diSocket, ADR(abOutBuffer), 2, 0);
+tCOMtimeoutValue := i_tCommTimeout;	(* Start Timeout *)
+
+(* Reset MQTT Request Timers *)
+xAwaitingCONNACK := FALSE;
+xAwaitingPINGRESP := FALSE;
+xAwaitingSUBACK := FALSE;
+xAwaitingUNSUBACK := FALSE;
+
+(* Send DISCONNECT successful *)
+IF diSendResult = 2 THEN
+	q_sLog := 'Sending DISCONNECT successfully';
+	q_xError := FALSE;
+	q_wState := 2#0111100001;			(* Next Step: Close Socket *)
+
+(* Send DISCONNECT failed *)
+ELSE
+	q_sLog := 'Sending DISCONNECT failed';
+	q_xError := TRUE;
+	q_wState := 2#1111100001;			(* Next Step: Retry until succeed or timeout *)
+END_IF
+
+(* DISCONNECT Timeout *)
+IF fbCOMtimeout.Q THEN
+	q_sLog := 'Disconnection from MQTT Broker Timeout';
+	q_xError := TRUE;
+	tCOMtimeoutValue := t#0ms;			(* Reset COM Timeout *)
+	q_wState := 2#1111100010;			(* Next Step: Close Socket *)
+END_IF
+diSendResult := 0;
+END_ACTION
+
+ACTION	AC_SendPINGREQ:
+(* Send PINGREQ to Broker
+--------------------------------------
+
+							Fixed Header								|
+							     2 bytes									|
+Control Packet Type	|		Flags		|	Remaining Length	|
+					 1 byte					|			1 byte			|
+						|	   Reserved	|							|
+			4 bits		|		4 bits		|							|
+value:		 12			|bin 0	0	0	0	|			   0				|
+
+Notes:
+- The Server MUST send a PINGRESP Packet in response to a PINGREQ Packet [MQTT-3.12.4-1].
+- This Packet is used in Keep Alive processing.
+- Keep Alive: It is the maximum time interval that is permitted to elapse between the point at which the Client finishes transmitting one Control Packet and the point it starts sending the next.
+	It is the responsibility of the Client to ensure that the interval between Control Packets being sent does not exceed the Keep Alive value. In the absence of sending any other Control Packets, the Client MUST send a PINGREQ Packet [MQTT-3.1.2-23].
+*)
+
+q_sLog := 'Sending PINGREQ to Broker';
+q_wState := 2#0111000000;
+
+(* Purge Out Buffer *)
+FOR iSendIndexCount := 0 TO BUFFER_SIZE DO abOutBuffer[iSendIndexCount] := 0; END_FOR
+
+(* Fixed Header *)
+(* MQTT Control Packet Type *)
+abOutBuffer[0] := 2#11000000;	(* 12 = PINGREQ  *)
+abOutBuffer[1] := 0;				(* Remaining Length always 0 for PINGREQ. The PINGREQ Packet has no variable header. *)
+
+(* Send PINGREQ *)
+diSendResult := SysSockSend(diSocket, ADR(abOutBuffer), 2, 0);
+xAwaitingPINGRESP := TRUE;
+
+(* Send PINGREQ successful *)
+IF diSendResult = 2 THEN
+	q_sLog := 'Sending PINGREQ successfully';
+	q_xError := FALSE;
+	q_wState := 2#0111000001;	(* Next Step: IDLE, wait for PINGRESP *)
+
+(* Send PINGREQ failed *)
+ELSE
+	q_sLog := 'Sending PINGREQ failed';
+	q_xError := TRUE;
+	q_wState := 2#1111000001;	(* Next Step: retry until timeout *)
+END_IF
+diSendResult := 0;
+END_ACTION
+
+ACTION	AC_SendPUBLISH:
+(* Send PUBLISH to Broker
+-------------------------------------
+
+							Fixed Header									|						Variable Header						|		Payload		|
+							1 + 1-4 bytes									|						    variable size						|	   variable size		|
+Control Packet Type	|		  Flags			|	Remaining Length	| Topic Length	|	Topic Name	|	Packet Identifier		|						|
+					 1 byte						|		1-4 bytes			|	2 bytes		|					| 0 | 2 bytes (if QoS > 0)	|						|
+						|  DUP	|  QoS	|Retain|							|  MSB	|  LSB	|					|	MSB	|	LSB		|						|
+			4 bits		| 1 bit	| 2 bits	|  1 bit	|							| 1 byte	| 1 byte	|					|    1 byte	|    1 byte		|						|
+value:		    3			|   0/1	| 0,1,2	|    0/1	|length VarHead+Payload	|	1-65536	|		UTF8		|		 0-65536			|		  UTF8			|
+
+Notes:
+- A PUBLISH Packet MUST NOT contain a Packet Identifier if its QoS value is set to 0 [MQTT-2.3.1-5].
+- Topic MUST be present as the first field in the PUBLISH Packet Variable header (after topic length).
+- The DUP flag MUST be set to 1 by the Client or Server when it attempts to re-deliver a PUBLISH Packet [MQTT-3.3.1.-1]. The DUP flag MUST be set to 0 for all QoS 0 messages [MQTT-3.3.1-2].
+- If the RETAIN flag is set to 1, in a PUBLISH Packet sent by a Client to a Server, the Server MUST store the Application Message and its QoS, so that it can be delivered to future subscribers whose subscriptions match its topic name [MQTT-3.3.1-5].
+  When a new subscription is established, the last retained message, if any, on each matching topic name MUST be sent to the subscriber [MQTT-3.3.1-6].
+- The Topic Name in the PUBLISH Packet MUST NOT contain wildcard characters [MQTT-3.3.2-2].
+*)
+
+q_sLog := CONCAT(CONCAT('Sending PUBLISH to Broker (d0, q0, r', BYTE_TO_STRING(BOOL_TO_BYTE(i_xRetain))), ', m0)');
+q_wState := 2#0100110000;
+
+(* All Topic Names and Topic Filters MUST be at least one character long [MQTT-4.7.3-1] *)
+IF LEN(sPublishTopic) <= 0 (*OR LEN(sPublishTopic) > 65535*) THEN (* TODO: check for wildcard characters *)
+	q_sLog := 'Send PUBLISH canceled: invalid topic length';
+	q_xError := TRUE;
+	q_wState := 2#1100110000;	(* Next Step: IDLE *)
+	RETURN;
+END_IF
+
+(* Purge Out Buffer *)
+FOR iSendIndexCount := 0 TO BUFFER_SIZE DO abOutBuffer[iSendIndexCount] := 0; END_FOR
+
+(* Fixed Header *)
+(* MQTT Control Packet Type *)
+abOutBuffer[0] := 2#00110000 + BOOL_TO_BYTE(i_xRetain);	(* 3 = PUBLISH. Control Packet Flags bit 0 for RETAIN, DUP flag = 0 for QoS 0. *)
+
+(* Calculate the Remaining Length - Length of Variable Header + Length of Payload. *)
+fbCalculateRemainingLength(wNumberOfBytes := 2 + LEN(sPublishTopic) + 0 + LEN(sPublishMessage));						(* Variable header = 2 (topic length) + Topic Name + Packet Identifier (0-2, here 0 because QoS=0) *)
+FOR iSendIndexCount := 1 TO fbCalculateRemainingLength.iRemainingLengthLength DO
+	abOutBuffer[iSendIndexCount] := fbCalculateRemainingLength.abRemainingLengthBytes[iSendIndexCount - 1];
+END_FOR
+
+(* Variable Header *)
+												abOutBuffer[iSendIndexCount] := INT_TO_BYTE(SHR(LEN(sPublishTopic), 8));	(* Topic Length MSB *)
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(sPublishTopic));			(* Topic Length LSB *)
+
+(* Topic MUST be present as the first field in the PUBLISH Packet Variable header (after topic length) *)
+iSendIndexCount := iSendIndexCount + 1;	MemMove(ADR(sPublishTopic), ADR(abOutBuffer[iSendIndexCount]), LEN(sPublishTopic));
+iSendIndexCount := iSendIndexCount + LEN(sPublishTopic) - 1;
+
+(* Packet Identifier: !!! A PUBLISH Packet MUST NOT contain a Packet Identifier if its QoS value is set to 0 !!! *)
+
+(* Payload *)
+iSendIndexCount := iSendIndexCount + 1;	MemMove(ADR(sPublishMessage), ADR(abOutBuffer[iSendIndexCount]), LEN(sPublishMessage));
+iSendIndexCount := iSendIndexCount + LEN(sPublishMessage) - 1;
+
+(* Send PUBLISH *)
+iSendIndexCount := iSendIndexCount + 1;	(* +1 because abOutBuffer is 0 based *)
+diSendResult := SysSockSend(diSocket, ADR(abOutBuffer), iSendIndexCount, 0);
+
+(* Send PUBLISH successful *)
+IF diSendResult = iSendIndexCount THEN
+	q_sLog := CONCAT(CONCAT('Sending PUBLISH to Broker (d0, q0, r', BYTE_TO_STRING(BOOL_TO_BYTE(i_xRetain))), ', m0) successfully');
+	q_xError := FALSE;
+	q_wState := 2#0100110001;	(* Next Step: IDLE *)
+
+(* Send PUBLISH failed *)
+ELSE
+	q_sLog := CONCAT(CONCAT('Sending PUBLISH to Broker (d0, q0, r', BYTE_TO_STRING(BOOL_TO_BYTE(i_xRetain))), ', m0) failed');
+	q_xError := TRUE;
+	q_wState := 2#1100110001;	(* Next Step: IDLE (QoS0, no retry) *)
+END_IF
+diSendResult := 0;
+END_ACTION
+
+ACTION	AC_SendSUBSCRIBE:
+(* Send SUBSCRIBE to Broker
+-----------------------------------------
+
+							Fixed Header								|	Variable Header	|											Payload										|
+							1 + 1-4 bytes								|		   2 bytes		|						  				 variable size										|
+Control Packet Type	|		Flags		|	Remaining Length	|	Packet Identifier	| Topic1 length	|   Topic Filter / QoS pair 1	|Topic n length	|   Topic Filter / QoS pair n	| ...	|
+					 1 byte					|		1-4 bytes			|		   2 bytes		|	2 bytes		|		x bytes		| 1 byte	|	2 bytes		|		x bytes		| 1 byte	| ...	|
+						|					|							|	MSB	|	LSB	|   MSB	|   LSB	|	Topic Filter		|  QoS	|   MSB	|   LSB	|	Topic Filter		|  QoS	| ...	|
+			4 bits		|		4 bits		|							|	1 byte	|	1 byte	| 1 byte	| 1 byte	|					| 2 bits	| 1 byte	| 1 byte	|					| 2 bits	| ...	|
+value:		    8			|bin 0	0	1	0	|length VarHead+Payload	|		1-65536		|    1-65536	|		UTF8		| 0.1.2	|    1-65536	|		UTF8		| 0,1,2	| ...	|
+
+Notes:
+- Bits 3,2,1 and 0 of the fixed header of the SUBSCRIBE Control Packet are reserved and MUST be set to 0,0,1 and 0 respectively. The Server MUST treat any other value as malformed and close the Network Connection [MQTT-3.8.1-1].
+- The payload of a SUBSCRIBE packet MUST contain at least one Topic Filter / QoS pair. A SUBSCRIBE packet with no payload is a protocol violation [MQTT-3.8.3-3].
+- The payload of a SUBSCRIBE packet MUST contain at least one Topic Filter / QoS pair. A SUBSCRIBE packet with no payload is a protocol violation [MQTT-3.8.3-3].
+- Topic Names and Topic Filters are UTF-8 encoded strings, they MUST NOT encode to more than 65535 bytes [MQTT-4.7.3-3].
+
+TODO: multiple topics subscription?
+*)
+
+q_sLog := 'Sending SUBSCRIBE to Broker';
+q_wState := 2#0110000000;
+
+(* All Topic Names and Topic Filters MUST be at least one character long [MQTT-4.7.3-1] *)
+IF LEN(sSubscribeTopic) <= 0 (*OR LEN(sSubscribeTopic) > 65535*) THEN
+	q_sLog := 'Send SUBSCRIBE canceled: invalid topic filter length';
+	q_xError := TRUE;
+	q_wState := 2#1110000000;	(* Next Step: IDLE *)
+	RETURN;
+END_IF
+
+(* Purge Out Buffer *)
+FOR iSendIndexCount := 0 TO BUFFER_SIZE DO abOutBuffer[iSendIndexCount] := 0; END_FOR
+
+(* Fixed Header *)
+(* MQTT Control Packet Type *)
+abOutBuffer[0] := 2#10000010;	(* 8 = SUBSCRIBE. Bits 3,2,1 and 0 of the fixed header of the SUBSCRIBE Control Packet are reserved and MUST be set to 0,0,1 and 0 respectively. The Server MUST treat any other value as malformed and close the Network Connection. *)
+
+(* Remaining Length: length of Variable Header (2 bytes) + length of Payload: (topic length field = 2 + topic length = N + QoS = 1) *)
+fbCalculateRemainingLength(wNumberOfBytes := 2 + 2 + LEN(sSubscribeTopic) + 1);
+FOR iSendIndexCount := 1 TO fbCalculateRemainingLength.iRemainingLengthLength DO
+	abOutBuffer[iSendIndexCount] := fbCalculateRemainingLength.abRemainingLengthBytes[iSendIndexCount - 1];
+END_FOR
+
+(* Packet Identifier *)
+wSendPacketIdentifier := wSendPacketIdentifier + 1;
+IF (wSendPacketIdentifier = 0) THEN wSendPacketIdentifier := 1; END_IF		(* Security when max value of WORD is reached *)
+												abOutBuffer[iSendIndexCount] := WORD_TO_BYTE(SHR(wSendPacketIdentifier, 8));		(* Variable Header: Packet Identifier MSB *)
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := WORD_TO_BYTE(wSendPacketIdentifier);				(* Variable Header: Packet Identifier LSB *)
+
+(* Payload *)
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(SHR(LEN(sSubscribeTopic), 8));		(* Payload: Topic Length MSB *)
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(sSubscribeTopic));					(* Payload: Topic Length LSB *)
+
+(* Topic Filter *)
+iSendIndexCount := iSendIndexCount + 1;	MemMove(ADR(sSubscribeTopic), ADR(abOutBuffer[iSendIndexCount]), LEN(sSubscribeTopic));
+iSendIndexCount := iSendIndexCount + LEN(sSubscribeTopic) -1;
+
+(* Topic Requested QoS *)
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := 0;	(* QoS = 0 *)
+
+(* Send SUBSCRIBE *)
+iSendIndexCount := iSendIndexCount + 1;	(* +1 because abOutBuffer is 0 based *)
+diSendResult := SysSockSend(diSocket, ADR(abOutBuffer), iSendIndexCount, 0);
+xAwaitingSUBACK := TRUE;
+
+(* Send SUBSCRIBE successful *)
+IF diSendResult = iSendIndexCount THEN
+	q_sLog := 'Sending SUBSCRIBE successfully';
+	q_xError := FALSE;
+	q_wState := 2#0110000001;	(* Next Step: IDLE (Wait for SUBACK) *)
+
+(* Send SUBSCRIBE failed *)
+ELSE
+	q_sLog := 'Sending SUBSCRIBE failed';
+	q_xError := TRUE;
+	q_wState := 2#1110000001;	(* Next Step: no retry for QoS0 (IDLE) *)
+END_IF
+diSendResult := 0;
+END_ACTION
+
+ACTION	AC_SendUNSUBSCRIBE:
+(* Send UNSUBSCRIBE to Broker
+----------------------------------------------
+
+							Fixed Header								|	Variable Header	|									Payload								|
+							1 + 1-4 bytes								|		   2 bytes		|						  		 variable size								|
+Control Packet Type	|		Flags		|	Remaining Length	|	Packet Identifier	| Topic1 length	|	Topic Filter		|Topic n length	|	Topic Filter 	| ...	|
+					 1 byte					|		1-4 bytes			|		   2 bytes		|	2 bytes		|	    x bytes		|	2 bytes		|	    x bytes		| ...	|
+						|					|							|	MSB	|	LSB	|   MSB	|   LSB	|	Topic Filter		|   MSB	|   LSB	|	Topic Filter		| ...	|
+			4 bits		|		4 bits		|							|	1 byte	|	1 byte	| 1 byte	| 1 byte	|					| 1 byte	| 1 byte	|					| ...	|
+value:		  10		|bin 0	0	1	0	|length VarHead+Payload	|		1-65536		|    1-65536	|		UTF8		|    1-65536	|		UTF8		| ...	|
+
+Notes:
+- Bits 3,2,1 and 0 of the fixed header of the UNSUBSCRIBE Control Packet are reserved and MUST be set to 0,0,1 and 0 respectively. The Server MUST treat any other value as malformed and close the Network Connection [MQTT-3.10.1-1].
+- The payload of an UNSUBSCRIBE packet MUST contain at least one Topic Filter. An UNSUBSCRIBE packet with no payload is a protocol violation [MQTT-3.10.3-2].
+- The Server MUST respond to an UNSUBSUBCRIBE request by sending an UNSUBACK packet. The UNSUBACK Packet MUST have the same Packet Identifier as the UNSUBSCRIBE Packet [MQTT-3.10.4-4]. Even where no Topic Subscriptions are deleted, the Server MUST respond with an UNSUBACK [MQTT-3.10.4-5].
+- A Client could also receive messages while an UNSUBSCRIBE operation is in progress.
+
+TODO: multiple topics unsubscription?
+*)
+
+q_sLog := 'Sending UNSUBSCRIBE to Broker';
+q_wState := 2#0110100000;
+
+(* All Topic Names and Topic Filters MUST be at least one character long [MQTT-4.7.3-1] *)
+IF LEN(sUnsubscribeTopic) <= 0 (*OR LEN(sUnsubscribeTopic) > 65535*) THEN
+	q_sLog := 'Send UNSUBSCRIBE canceled: at least one topic filter is required';
+	q_xError := TRUE;
+	q_wState := 2#1110100000;	(* Next Step: IDLE *)
+	RETURN;
+END_IF
+
+(* Purge Out Buffer *)
+FOR iSendIndexCount := 0 TO BUFFER_SIZE DO abOutBuffer[iSendIndexCount] := 0; END_FOR
+
+(* Fixed Header *)
+(* MQTT Control Packet Type *)
+abOutBuffer[0] := 2#10100010;	(* 10 = UNSUBSCRIBE. Bits 3,2,1 and 0 of the fixed header of the UNSUBSCRIBE Control Packet are reserved and MUST be set to 0,0,1 and 0 respectively. The Server MUST treat any other value as malformed and close the Network Connection. *)
+
+(* Remaining Length: length of Variable Header (2 bytes) + length of Payload: (topic length field = 2 + topic filter length = N) *)
+fbCalculateRemainingLength(wNumberOfBytes := 2 + 2 + LEN(sUnsubscribeTopic));
+FOR iSendIndexCount := 1 TO fbCalculateRemainingLength.iRemainingLengthLength DO
+	abOutBuffer[iSendIndexCount] := fbCalculateRemainingLength.abRemainingLengthBytes[iSendIndexCount - 1];
+END_FOR
+
+(* Packet Identifier *)
+wSendPacketIdentifier := wSendPacketIdentifier + 1;
+IF (wSendPacketIdentifier = 0) THEN wSendPacketIdentifier := 1; END_IF	(* Security when max value of WORD is reached *)
+												abOutBuffer[iSendIndexCount] := WORD_TO_BYTE(SHR(wSendPacketIdentifier, 8));		(* Variable Header: Packet Identifier MSB *)
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := WORD_TO_BYTE(wSendPacketIdentifier);				(* Variable Header: Packet Identifier LSB *)
+
+(* Payload *)
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(SHR(LEN(sUnsubscribeTopic), 8));		(* Payload: Topic Length MSB *)
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(sUnsubscribeTopic));				(* Payload: Topic Length LSB *)
+
+(* Topic Filter *)
+iSendIndexCount := iSendIndexCount + 1;	MemMove(ADR(sUnsubscribeTopic), ADR(abOutBuffer[iSendIndexCount]), LEN(sUnsubscribeTopic));
+iSendIndexCount := iSendIndexCount + LEN(sUnsubscribeTopic) - 1;
+
+(* Send UNSUBSCRIBE *)
+iSendIndexCount := iSendIndexCount + 1;	(* +1 because abOutBuffer is 0 based *)
+diSendResult := SysSockSend(diSocket, ADR(abOutBuffer), iSendIndexCount, 0);
+xAwaitingUNSUBACK := TRUE;
+
+(* Send UNSUBSCRIBE successful *)
+IF diSendResult = iSendIndexCount THEN
+	q_sLog := 'Sending UNSUBSCRIBE successfully';
+	q_xError := FALSE;
+	q_wState := 2#0110100001;	(* Next Step: IDLE (Wait for UNSUBACK) *)
+
+(* Send UNSUBSCRIBE failed *)
+ELSE
+	q_sLog := 'Sending UNSUBSCRIBE failed';
+	q_xError := TRUE;
+	q_wState := 2#1110100001;	(* Next Step: no retry for QoS0 (IDLE) *)
+END_IF
+diSendResult := 0;
+END_ACTION
+
+ACTION	AC_TimeoutCONNECT:
+(* Handle CONNECT Timeout
+-----------------------------------------
+
+Notes:
+- If the Client does not receive a CONNACK Packet from the Server within a reasonable amount of time, the Client SHOULD close the Network Connection. A "reasonable" amount of time depends on the type of application and the communications infrastructure.
+*)
+
+fbTimeoutCONNECT(IN := xAwaitingCONNACK, PT := i_tCommTimeout);
+IF fbTimeoutCONNECT.Q THEN
+	q_sLog := 'CONNECT Timeout, CONNACK not received';
+	q_xError := TRUE;
+	q_wState := 2#1100010111;	(* Next Step: Close Socket *)
+END_IF
+END_ACTION
+
+ACTION	AC_TimeoutPINGREQ:
+(* Handle PINGREQ Timeout
+----------------------------------------
+
+Notes:
+- If a Client does not receive a PINGRESP Packet within a reasonable amount of time after it has sent a PINGREQ, it SHOULD close the Network Connection to the Server.
+*)
+
+fbTimeoutPINGREQ(IN := xAwaitingPINGRESP, PT := i_tCommTimeout);
+
+(* PINGREQ Timeout *)
+IF fbTimeoutPINGREQ.Q THEN
+	q_sLog := 'PINGREQ Timeout, PINGRESP not received';
+	q_xError := TRUE;
+	q_wState := 2#1111000010;	(* Next Step: Close Socket *)
+END_IF
+END_ACTION
+
+ACTION	AC_TimeoutSUBSCRIBE:
+(* Handle SUBSCRIBE Timeout
+-------------------------------------------
+*)
+
+fbTimeoutSUBSCRIBE(IN := xAwaitingSUBACK, PT := i_tCommTimeout);
+IF fbTimeoutSUBSCRIBE.Q THEN
+	q_sLog := 'SUBSCRIBE Timeout, SUBACK not received';
+	q_xError := TRUE;
+	q_wState := 2#1110000010;	(* Next Step: Disconnect *)
+END_IF
+END_ACTION
+
+ACTION	AC_TimeoutUNSUBSCRIBE:
+(* Handle UNSUBSCRIBE Timeout
+------------------------------------------------
+
+Notes:
+- The Server MUST respond to an UNSUBSUBCRIBE request by sending an UNSUBACK packet.
+- Even where no Topic Subscriptions are deleted, the Server MUST respond with an UNSUBACK [MQTT-3.10.4-5].
+*)
+
+fbTimeoutUNSUBSCRIBE(IN := xAwaitingUNSUBACK, PT := i_tCommTimeout);
+IF fbTimeoutUNSUBSCRIBE.Q THEN
+	q_sLog := 'UNSUBSCRIBE Timeout, UNSUBACK not received';
+	q_xError := TRUE;
+	q_wState := 2#1110100010;	(* Next Step: Disconnect *)
+END_IF
+END_ACTION
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(* @NESTEDCOMMENTS := 'Yes' *)
+(* @PATH := '\/FCFB\/MQTT_Client' *)
+(* @OBJECTFLAGS := '0, 8' *)
+(* @SYMFILEFLAGS := '2048' *)
+FUNCTION_BLOCK FB_Random
+VAR_INPUT
+	A: DWORD;
+	B: DWORD;
+	V: DWORD;
+END_VAR
+VAR_OUTPUT
+	dwRandom: DWORD;
+END_VAR
+VAR
+	M: DWORD;
+	Q: DWORD;
+END_VAR
+(* @END_DECLARATION := '0' *)
+Q := Q + 2;
+
+M := 25;
+dwRandom := (A+V+B+Q) MOD M + 65;
+END_FUNCTION_BLOCK
+
+
+(* @NESTEDCOMMENTS := 'Yes' *)
+(* @PATH := '\/FCFB\/MQTT_Client' *)
+(* @OBJECTFLAGS := '0, 8' *)
+(* @SYMFILEFLAGS := '2048' *)
+FUNCTION MemMove : BOOL
+VAR_INPUT
+	pSource	: POINTER TO BYTE;
+	pDest		: POINTER TO BYTE;
+	size		: DWORD;
+END_VAR
+VAR
+	i			: DWORD;
+END_VAR
+(* @END_DECLARATION := '0' *)
+IF size <= 0 THEN RETURN; END_IF
+
+FOR i := 0 TO size - 1 DO
+	pDest^ := pSource^;
+	pDest := pDest + 1;
+	pSource := pSource + 1;
+END_FOR
+END_FUNCTION
+
+
+(* @NESTEDCOMMENTS := 'Yes' *)
+(* @PATH := '\/FCFB\/MQTT_Client' *)
+(* @OBJECTFLAGS := '0, 8' *)
+(* @SYMFILEFLAGS := '2048' *)
+FUNCTION MemSet : BOOL
+VAR_INPUT
+	pDest			: POINTER TO BYTE;	(* Pointer to destination *)
+	bCharacter	: BYTE;					(* Character to set *)
+	dwCount		: DWORD;				(* Number of characters *)
+END_VAR
+VAR
+	i				 : DWORD;
+END_VAR
+(* @END_DECLARATION := '0' *)
+IF dwCount <= 0 THEN RETURN; END_IF
+
+FOR i := 0 TO dwCount - 1 DO
+	pDest^ := bCharacter;
+	pDest := pDest + 1;
+END_FOR
+END_FUNCTION
