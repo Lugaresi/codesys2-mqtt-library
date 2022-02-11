@@ -1,7 +1,7 @@
 
 
 (* @NESTEDCOMMENTS := 'Yes' *)
-(* @PATH := '\/FCFB\/MQTT_Client' *)
+(* @PATH := '\/MQTT_Client' *)
 (* @OBJECTFLAGS := '0, 8' *)
 (* @SYMFILEFLAGS := '2048' *)
 FUNCTION_BLOCK FB_CalculateRemainingLength
@@ -45,7 +45,7 @@ END_FUNCTION_BLOCK
 
 
 (* @NESTEDCOMMENTS := 'Yes' *)
-(* @PATH := '\/FCFB\/MQTT_Client' *)
+(* @PATH := '\/MQTT_Client' *)
 (* @OBJECTFLAGS := '0, 8' *)
 (* @SYMFILEFLAGS := '2048' *)
 FUNCTION_BLOCK FB_DecodeRemainingLength
@@ -89,7 +89,7 @@ END_FUNCTION_BLOCK
 
 
 (* @NESTEDCOMMENTS := 'Yes' *)
-(* @PATH := '\/FCFB\/MQTT_Client' *)
+(* @PATH := '\/MQTT_Client' *)
 (* @OBJECTFLAGS := '0, 8' *)
 (* @SYMFILEFLAGS := '2048' *)
 (*	This Function Block implements an MQTT Client
@@ -628,12 +628,12 @@ IF bRecvQoS = 0 (* AND xDup = FALSE *) THEN	(* Ensure QoS = 0 *)
 	uiRecvPayloadLength := fbDecodeRemainingLength.uiRemainingLength - (2 + uiRecvTopicLength + 0);	(* Variable Header Length = 2 + Topic Length + 0-2 (depending on QoS)*)
 
 	(* Topic *)
-	MemSet(ADR(q_sLastReceivedTopic), 0, MQTT_TOPIC_MAX_LENGTH);
-	MemMove(ADR(abInBuffer[1 + fbDecodeRemainingLength.iRemainingLengthLength + 2]), ADR(q_sLastReceivedTopic), MIN(uiRecvTopicLength, MQTT_TOPIC_MAX_LENGTH));	(* Security: MQTT_TOPIC_MAX_LENGTH *)
+	SysMemSet(ADR(q_sLastReceivedTopic), 0, MQTT_TOPIC_MAX_LENGTH);
+	SysMemMove(ADR(abInBuffer[1 + fbDecodeRemainingLength.iRemainingLengthLength + 2]), ADR(q_sLastReceivedTopic), MIN(uiRecvTopicLength, MQTT_TOPIC_MAX_LENGTH));	(* Security: MQTT_TOPIC_MAX_LENGTH *)
 
 	(* Payload *)
-	MemSet(ADR(q_sLastReceivedMessage), 0, MQTT_MESSAGE_MAX_LENGTH);
-	MemMove(ADR(abInBuffer[1 + fbDecodeRemainingLength.iRemainingLengthLength + 2 + uiRecvTopicLength]), ADR(q_sLastReceivedMessage), MIN(uiRecvPayloadLength, MQTT_MESSAGE_MAX_LENGTH));	(* Security: MQTT_MESSAGE_MAX_LENGTH *)
+	SysMemSet(ADR(q_sLastReceivedMessage), 0, MQTT_MESSAGE_MAX_LENGTH);
+	SysMemMove(ADR(abInBuffer[1 + fbDecodeRemainingLength.iRemainingLengthLength + 2 + uiRecvTopicLength]), ADR(q_sLastReceivedMessage), MIN(uiRecvPayloadLength, MQTT_MESSAGE_MAX_LENGTH));	(* Security: MQTT_MESSAGE_MAX_LENGTH *)
 
 	q_xReceivedMessageNotification := TRUE;
 	q_xError := FALSE;
@@ -949,7 +949,7 @@ IF i_sClientIdentifier = '' THEN
 ELSE
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := 0;														(* Given ClientId length MSB (always 0 since i_sClientIdentifier is always less than 23 chars length) *)
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(i_sClientIdentifier));				(* Given ClientId length LSB *)
-	iSendIndexCount := iSendIndexCount + 1;	MemMove(ADR(i_sClientIdentifier), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sClientIdentifier));
+	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(i_sClientIdentifier), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sClientIdentifier));
 	iSendIndexCount := iSendIndexCount + LEN(i_sClientIdentifier) - 1;
 END_IF
 
@@ -957,7 +957,7 @@ END_IF
 IF i_sWillTopic <> '' THEN
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(SHR(LEN(i_sWillTopic), 8));			(* Will Topic length MSB *)
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(i_sWillTopic));					(* Will Topic length LSB *)
-	iSendIndexCount := iSendIndexCount + 1;	MemMove(ADR(i_sWillTopic), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sWillTopic));
+	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(i_sWillTopic), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sWillTopic));
 	iSendIndexCount := iSendIndexCount + LEN(i_sWillTopic) - 1;
 END_IF
 
@@ -965,7 +965,7 @@ END_IF
 IF i_sWillMessage <> '' THEN
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(SHR(LEN(i_sWillMessage), 8));		(* Will Message length MSB *)
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(i_sWillMessage));				(* Will Message length LSB *)
-	iSendIndexCount := iSendIndexCount + 1;	MemMove(ADR(i_sWillMessage), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sWillMessage));
+	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(i_sWillMessage), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sWillMessage));
 	iSendIndexCount := iSendIndexCount + LEN(i_sWillMessage) - 1;
 END_IF
 
@@ -973,7 +973,7 @@ END_IF
 IF i_sUsername <> '' THEN
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(SHR(LEN(i_sUsername), 8));		(* User Name length MSB *)
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(i_sUsername));					(* User Name length LSB *)
-	iSendIndexCount := iSendIndexCount + 1;	MemMove(ADR(i_sUsername), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sUsername));
+	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(i_sUsername), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sUsername));
 	iSendIndexCount := iSendIndexCount + LEN(i_sUsername) - 1;
 END_IF
 
@@ -981,7 +981,7 @@ END_IF
 IF i_sPassword <> '' THEN
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(SHR(LEN(i_sPassword), 8));		(* Password length MSB *)
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(i_sPassword));					(* Password length LSB *)
-	iSendIndexCount := iSendIndexCount + 1;	MemMove(ADR(i_sPassword), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sPassword));
+	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(i_sPassword), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sPassword));
 	iSendIndexCount := iSendIndexCount + LEN(i_sUsername) - 1;
 END_IF
 
@@ -1174,13 +1174,13 @@ END_FOR
 iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(sPublishTopic));			(* Topic Length LSB *)
 
 (* Topic MUST be present as the first field in the PUBLISH Packet Variable header (after topic length) *)
-iSendIndexCount := iSendIndexCount + 1;	MemMove(ADR(sPublishTopic), ADR(abOutBuffer[iSendIndexCount]), LEN(sPublishTopic));
+iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(sPublishTopic), ADR(abOutBuffer[iSendIndexCount]), LEN(sPublishTopic));
 iSendIndexCount := iSendIndexCount + LEN(sPublishTopic) - 1;
 
 (* Packet Identifier: !!! A PUBLISH Packet MUST NOT contain a Packet Identifier if its QoS value is set to 0 !!! *)
 
 (* Payload *)
-iSendIndexCount := iSendIndexCount + 1;	MemMove(ADR(sPublishMessage), ADR(abOutBuffer[iSendIndexCount]), LEN(sPublishMessage));
+iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(sPublishMessage), ADR(abOutBuffer[iSendIndexCount]), LEN(sPublishMessage));
 iSendIndexCount := iSendIndexCount + LEN(sPublishMessage) - 1;
 
 (* Send PUBLISH *)
@@ -1260,7 +1260,7 @@ iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_B
 iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(sSubscribeTopic));					(* Payload: Topic Length LSB *)
 
 (* Topic Filter *)
-iSendIndexCount := iSendIndexCount + 1;	MemMove(ADR(sSubscribeTopic), ADR(abOutBuffer[iSendIndexCount]), LEN(sSubscribeTopic));
+iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(sSubscribeTopic), ADR(abOutBuffer[iSendIndexCount]), LEN(sSubscribeTopic));
 iSendIndexCount := iSendIndexCount + LEN(sSubscribeTopic) -1;
 
 (* Topic Requested QoS *)
@@ -1344,7 +1344,7 @@ iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_B
 iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(sUnsubscribeTopic));				(* Payload: Topic Length LSB *)
 
 (* Topic Filter *)
-iSendIndexCount := iSendIndexCount + 1;	MemMove(ADR(sUnsubscribeTopic), ADR(abOutBuffer[iSendIndexCount]), LEN(sUnsubscribeTopic));
+iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(sUnsubscribeTopic), ADR(abOutBuffer[iSendIndexCount]), LEN(sUnsubscribeTopic));
 iSendIndexCount := iSendIndexCount + LEN(sUnsubscribeTopic) - 1;
 
 (* Send UNSUBSCRIBE *)
@@ -1467,7 +1467,7 @@ END_ACTION
 
 
 (* @NESTEDCOMMENTS := 'Yes' *)
-(* @PATH := '\/FCFB\/MQTT_Client' *)
+(* @PATH := '\/MQTT_Client' *)
 (* @OBJECTFLAGS := '0, 8' *)
 (* @SYMFILEFLAGS := '2048' *)
 FUNCTION_BLOCK FB_Random
@@ -1489,50 +1489,3 @@ Q := Q + 2;
 M := 25;
 dwRandom := (A+V+B+Q) MOD M + 65;
 END_FUNCTION_BLOCK
-
-
-(* @NESTEDCOMMENTS := 'Yes' *)
-(* @PATH := '\/FCFB\/MQTT_Client' *)
-(* @OBJECTFLAGS := '0, 8' *)
-(* @SYMFILEFLAGS := '2048' *)
-FUNCTION MemMove : BOOL
-VAR_INPUT
-	pSource	: POINTER TO BYTE;
-	pDest		: POINTER TO BYTE;
-	size		: DWORD;
-END_VAR
-VAR
-	i			: DWORD;
-END_VAR
-(* @END_DECLARATION := '0' *)
-IF size <= 0 THEN RETURN; END_IF
-
-FOR i := 0 TO size - 1 DO
-	pDest^ := pSource^;
-	pDest := pDest + 1;
-	pSource := pSource + 1;
-END_FOR
-END_FUNCTION
-
-
-(* @NESTEDCOMMENTS := 'Yes' *)
-(* @PATH := '\/FCFB\/MQTT_Client' *)
-(* @OBJECTFLAGS := '0, 8' *)
-(* @SYMFILEFLAGS := '2048' *)
-FUNCTION MemSet : BOOL
-VAR_INPUT
-	pDest			: POINTER TO BYTE;	(* Pointer to destination *)
-	bCharacter	: BYTE;					(* Character to set *)
-	dwCount		: DWORD;				(* Number of characters *)
-END_VAR
-VAR
-	i				 : DWORD;
-END_VAR
-(* @END_DECLARATION := '0' *)
-IF dwCount <= 0 THEN RETURN; END_IF
-
-FOR i := 0 TO dwCount - 1 DO
-	pDest^ := bCharacter;
-	pDest := pDest + 1;
-END_FOR
-END_FUNCTION
