@@ -629,11 +629,11 @@ IF bRecvQoS = 0 (* AND xDup = FALSE *) THEN	(* Ensure QoS = 0 *)
 
 	(* Topic *)
 	SysMemSet(ADR(q_sLastReceivedTopic), 0, MQTT_TOPIC_MAX_LENGTH);
-	SysMemMove(ADR(abInBuffer[1 + fbDecodeRemainingLength.iRemainingLengthLength + 2]), ADR(q_sLastReceivedTopic), MIN(uiRecvTopicLength, MQTT_TOPIC_MAX_LENGTH));	(* Security: MQTT_TOPIC_MAX_LENGTH *)
+	SysMemMove(ADR(q_sLastReceivedTopic), ADR(abInBuffer[1 + fbDecodeRemainingLength.iRemainingLengthLength + 2]), MIN(uiRecvTopicLength, MQTT_TOPIC_MAX_LENGTH));	(* Security: MQTT_TOPIC_MAX_LENGTH *)
 
 	(* Payload *)
 	SysMemSet(ADR(q_sLastReceivedMessage), 0, MQTT_MESSAGE_MAX_LENGTH);
-	SysMemMove(ADR(abInBuffer[1 + fbDecodeRemainingLength.iRemainingLengthLength + 2 + uiRecvTopicLength]), ADR(q_sLastReceivedMessage), MIN(uiRecvPayloadLength, MQTT_MESSAGE_MAX_LENGTH));	(* Security: MQTT_MESSAGE_MAX_LENGTH *)
+	SysMemMove(ADR(q_sLastReceivedMessage), ADR(abInBuffer[1 + fbDecodeRemainingLength.iRemainingLengthLength + 2 + uiRecvTopicLength]), MIN(uiRecvPayloadLength, MQTT_MESSAGE_MAX_LENGTH));	(* Security: MQTT_MESSAGE_MAX_LENGTH *)
 
 	q_xReceivedMessageNotification := TRUE;
 	q_xError := FALSE;
@@ -949,7 +949,7 @@ IF i_sClientIdentifier = '' THEN
 ELSE
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := 0;														(* Given ClientId length MSB (always 0 since i_sClientIdentifier is always less than 23 chars length) *)
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(i_sClientIdentifier));				(* Given ClientId length LSB *)
-	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(i_sClientIdentifier), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sClientIdentifier));
+	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(abOutBuffer[iSendIndexCount]), ADR(i_sClientIdentifier), LEN(i_sClientIdentifier));
 	iSendIndexCount := iSendIndexCount + LEN(i_sClientIdentifier) - 1;
 END_IF
 
@@ -957,7 +957,7 @@ END_IF
 IF i_sWillTopic <> '' THEN
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(SHR(LEN(i_sWillTopic), 8));			(* Will Topic length MSB *)
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(i_sWillTopic));					(* Will Topic length LSB *)
-	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(i_sWillTopic), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sWillTopic));
+	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(abOutBuffer[iSendIndexCount]), ADR(i_sWillTopic), LEN(i_sWillTopic));
 	iSendIndexCount := iSendIndexCount + LEN(i_sWillTopic) - 1;
 END_IF
 
@@ -965,7 +965,7 @@ END_IF
 IF i_sWillMessage <> '' THEN
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(SHR(LEN(i_sWillMessage), 8));		(* Will Message length MSB *)
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(i_sWillMessage));				(* Will Message length LSB *)
-	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(i_sWillMessage), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sWillMessage));
+	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(abOutBuffer[iSendIndexCount]), ADR(i_sWillMessage), LEN(i_sWillMessage));
 	iSendIndexCount := iSendIndexCount + LEN(i_sWillMessage) - 1;
 END_IF
 
@@ -973,7 +973,7 @@ END_IF
 IF i_sUsername <> '' THEN
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(SHR(LEN(i_sUsername), 8));		(* User Name length MSB *)
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(i_sUsername));					(* User Name length LSB *)
-	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(i_sUsername), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sUsername));
+	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(abOutBuffer[iSendIndexCount]), ADR(i_sUsername), LEN(i_sUsername));
 	iSendIndexCount := iSendIndexCount + LEN(i_sUsername) - 1;
 END_IF
 
@@ -981,7 +981,7 @@ END_IF
 IF i_sPassword <> '' THEN
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(SHR(LEN(i_sPassword), 8));		(* Password length MSB *)
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(i_sPassword));					(* Password length LSB *)
-	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(i_sPassword), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sPassword));
+	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(abOutBuffer[iSendIndexCount]), ADR(i_sPassword), LEN(i_sPassword));
 	iSendIndexCount := iSendIndexCount + LEN(i_sUsername) - 1;
 END_IF
 
@@ -1174,13 +1174,13 @@ END_FOR
 iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(sPublishTopic));			(* Topic Length LSB *)
 
 (* Topic MUST be present as the first field in the PUBLISH Packet Variable header (after topic length) *)
-iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(sPublishTopic), ADR(abOutBuffer[iSendIndexCount]), LEN(sPublishTopic));
+iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(abOutBuffer[iSendIndexCount]), ADR(sPublishTopic), LEN(sPublishTopic));
 iSendIndexCount := iSendIndexCount + LEN(sPublishTopic) - 1;
 
 (* Packet Identifier: !!! A PUBLISH Packet MUST NOT contain a Packet Identifier if its QoS value is set to 0 !!! *)
 
 (* Payload *)
-iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(sPublishMessage), ADR(abOutBuffer[iSendIndexCount]), LEN(sPublishMessage));
+iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(abOutBuffer[iSendIndexCount]), ADR(sPublishMessage), LEN(sPublishMessage));
 iSendIndexCount := iSendIndexCount + LEN(sPublishMessage) - 1;
 
 (* Send PUBLISH *)
@@ -1260,7 +1260,7 @@ iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_B
 iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(sSubscribeTopic));					(* Payload: Topic Length LSB *)
 
 (* Topic Filter *)
-iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(sSubscribeTopic), ADR(abOutBuffer[iSendIndexCount]), LEN(sSubscribeTopic));
+iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(abOutBuffer[iSendIndexCount]), ADR(sSubscribeTopic), LEN(sSubscribeTopic));
 iSendIndexCount := iSendIndexCount + LEN(sSubscribeTopic) -1;
 
 (* Topic Requested QoS *)
@@ -1344,7 +1344,7 @@ iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_B
 iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(sUnsubscribeTopic));				(* Payload: Topic Length LSB *)
 
 (* Topic Filter *)
-iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(sUnsubscribeTopic), ADR(abOutBuffer[iSendIndexCount]), LEN(sUnsubscribeTopic));
+iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(abOutBuffer[iSendIndexCount]), ADR(sUnsubscribeTopic), LEN(sUnsubscribeTopic));
 iSendIndexCount := iSendIndexCount + LEN(sUnsubscribeTopic) - 1;
 
 (* Send UNSUBSCRIBE *)
