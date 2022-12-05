@@ -93,7 +93,7 @@ END_FUNCTION_BLOCK
 (* @OBJECTFLAGS := '0, 8' *)
 (* @SYMFILEFLAGS := '2048' *)
 (*	This Function Block implements an MQTT Client
-	Version: 2.7
+	Version: 2.8
 	Supported:
 		CONNECT / DISCONNECT / PING (Keep Alive)
 		SUBSCRIBE / UNSUBSCRIBE (single topic)
@@ -102,7 +102,9 @@ END_FUNCTION_BLOCK
 		Optional Last Will and Testament
 		Optional ClientId and Username, Password authentication
 
-MQTT v3.1.1 Specification: https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/mqtt-v3.1.1.html
+	The only dependencies are Standard, SysLibSockets and SysLibMem libraries.
+
+	MQTT v3.1.1 Specification: https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/mqtt-v3.1.1.html
 *)
 FUNCTION_BLOCK FB_MQTTClient
 
