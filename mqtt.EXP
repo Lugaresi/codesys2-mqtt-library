@@ -93,7 +93,7 @@ END_FUNCTION_BLOCK
 (* @OBJECTFLAGS := '0, 8' *)
 (* @SYMFILEFLAGS := '2048' *)
 (*	This Function Block implements an MQTT Client
-	Version: 2.7
+	Version: 2.8
 	Supported:
 		CONNECT / DISCONNECT / PING (Keep Alive)
 		SUBSCRIBE / UNSUBSCRIBE (single topic)
@@ -102,7 +102,9 @@ END_FUNCTION_BLOCK
 		Optional Last Will and Testament
 		Optional ClientId and Username, Password authentication
 
-MQTT v3.1.1 Specification: https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/mqtt-v3.1.1.html
+	The only dependencies are Standard, SysLibSockets and SysLibMem libraries.
+
+	MQTT v3.1.1 Specification: https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/mqtt-v3.1.1.html
 *)
 FUNCTION_BLOCK FB_MQTTClient
 
@@ -159,6 +161,7 @@ VAR
 	xResult								: BOOL;
 	diRecvResult							: DINT;
 	diSendResult							: DINT;
+	diInBufferOffset						: DINT;
 	abInBuffer								: ARRAY[0..BUFFER_SIZE] OF BYTE;					(* PUBLISH is the biggest packet. Its size should not exceed 9+MESSAGE_MAX_LENGHT+TOPIC_MAX_LENGHT, but as this is not possible in CodeSys, let start with 512 sized Input Buffer *)
 	abOutBuffer							: ARRAY[0..BUFFER_SIZE] OF BYTE;
 
@@ -243,7 +246,7 @@ CASE q_wState OF
 	2#1000110001,						(* Close Socket if received PUBLISH from Broker with QoS 0b11 (protocol violation) *)
 	2#1010010001,						(* Close Socket if received invalid SUBACK Packet Identifier or RC 0x80 *)
 	2#1010110001,						(* Close Socket if received invalid UNSUBACK Packet Identifier *)
-	2#1011010001,						(* Close Socket if received invalid PIGRESP (protocol violation) *)
+	2#1011010001,						(* Close Socket if received invalid PINGRESP (protocol violation) *)
 	2#1111000010,						(* Close Socket on PINGREQ Timeout *)
 	2#0111100001,						(* Close Socket after sending DISCONNECT successfully *)
 	2#1111100010,						(* Close Socket on DISCONNECT Timeout *)
@@ -267,10 +270,13 @@ IF q_xConnected THEN
 	R_TRIG_Unsubscribe(CLK := i_xUnsubscribe AND q_xIDLE);	IF R_TRIG_Unsubscribe.Q	THEN	sUnsubscribeTopic := i_sUnsubscribeTopic;									AC_SendUNSUBSCRIBE();	END_IF
 
 	(* Handle any incoming MQTT packet *)
-	diRecvResult := SysSockRecv(diSocket := diSocket, pbyBuffer := ADR(abInBuffer), diBufferSize := BUFFER_SIZE+1, diFlags := 0);
-	q_xReceivedMessageNotification := FALSE;
-	IF diRecvResult > 0 THEN
-		bRecvCtrl := SHR(abInBuffer[0], 4);			(* Check Control Packet Type *)
+	IF diRecvResult <= 0 THEN
+		diRecvResult := SysSockRecv(diSocket := diSocket, pbyBuffer := ADR(abInBuffer), diBufferSize := BUFFER_SIZE+1, diFlags := 0);
+		q_xReceivedMessageNotification := FALSE;
+		diInBufferOffset := 0;
+	END_IF
+	IF diRecvResult > 0 THEN 					(* diRecvResult is > 0 as long as not all playloads have been read *)
+		bRecvCtrl := SHR(abInBuffer[diInBufferOffset+0], 4);		(* Check Control Packet Type *)
 		CASE bRecvCtrl OF
 			00:	AC_HandleReserved();			(* Reserved *)
 			01:	AC_HandleCONNECT();			(* CONNECT *)
@@ -298,7 +304,7 @@ IF q_xConnected THEN
 	AC_TimeoutUNSUBSCRIBE();
 
 	(* Purge MQTT Control Packet Type from In Buffer on Error *)
-	IF q_xError THEN abInBuffer[0] := 0; END_IF
+	IF q_xError THEN abInBuffer[diInBufferOffset+0] := 0; END_IF
 END_IF
 
 (* Handle COM Timeouts *)
@@ -458,15 +464,18 @@ Notes:
 q_sLog := 'Received CONNACK from Broker';
 q_wState := 2#0000100000;
 
+(* Remaining length: Number of bytes left within current packet, including variable header plus payload. *)
+fbDecodeRemainingLength(pabRemainingLengthBytes := ADR(abInBuffer[diInBufferOffset + 1]));
+
 (* Check CONNACK return code in Variable Header 2nd Byte*)
-IF abInBuffer[3] = 0 THEN			(* Success *)
+IF abInBuffer[diInBufferOffset + 1 + fbDecodeRemainingLength.iRemainingLengthLength + 1] = 0 THEN	(* Success *)
 	xAwaitingCONNACK := FALSE;
 	q_xError := FALSE;
 	q_wState := 2#0000100001;	(* Next step: IDLE *)
 
 ELSE								(* Error *)
 	q_sLog := 'Connection Refused';
-	CASE abInBuffer[3] OF
+	CASE abInBuffer[diInBufferOffset + 1 + fbDecodeRemainingLength.iRemainingLengthLength + 1] OF
 																		(* 0: Connection Accepted *)
 		1:	CONCAT(q_sLog, ', Unacceptable Protocol Version');	(* 1: Connection Refused, unacceptable protocol version *)
 		2:	CONCAT(q_sLog, ', Identifier Rejected');					(* 2: Connection Refused, identifier rejected *)
@@ -479,7 +488,11 @@ ELSE								(* Error *)
 	q_wState := 2#1000100001;	(* Next step: Close Socket *)
 END_IF
 diSendResult := 0;
-diRecvResult := 0;
+
+diInBufferOffset := diInBufferOffset + 1 + fbDecodeRemainingLength.iRemainingLengthLength + fbDecodeRemainingLength.uiRemainingLength;
+IF diRecvResult - diInBufferOffset <= 0 THEN
+	diRecvResult := 0;
+END_IF
 END_ACTION
 
 ACTION	AC_HandleCONNECT:
@@ -543,7 +556,7 @@ q_sLog := 'Received PINGRESP from Broker';
 q_wState := 2#0011010000;
 
 (* PINGRESP OK *)
-IF abInBuffer[1] = 0 THEN
+IF abInBuffer[diInBufferOffset + 1] = 0 THEN
 	xAwaitingPINGRESP := FALSE;
 	xResetKeepAliveTimer := TRUE;
 	q_xError := FALSE;
@@ -555,7 +568,11 @@ ELSE
 	q_wState := 2#1011010001;	(* Next Step: Close Soket since this is a protocol violation *)
 END_IF
 diSendResult := 0;
-diRecvResult := 0;
+
+diInBufferOffset := diInBufferOffset + 1 + 1;
+IF diRecvResult - diInBufferOffset <= 0 THEN
+	diRecvResult := 0;
+END_IF
 END_ACTION
 
 ACTION	AC_HandlePUBACK:
@@ -607,9 +624,9 @@ Notes:
 *)
 
 (* for future use *)
-xRecvDup		:= (SHR(abInBuffer[0], 3) AND 2#1) > 0;	(* Received SUP: The DUP flag MUST be set to 0 for all QoS 0 messages *)
-bRecvQoS		:=  SHR(abInBuffer[0], 1) AND 2#11;		(* Received QoS: should be 0 *)
-xRecvRetain	:= 		 (abInBuffer[0] AND 2#1) > 0;	(* Received Reatain flag *)
+xRecvDup		:= (SHR(abInBuffer[diInBufferOffset + 0], 3)	AND 2#1) > 0;	(* Received SUP: The DUP flag MUST be set to 0 for all QoS 0 messages *)
+bRecvQoS		:=  SHR(abInBuffer[diInBufferOffset + 0], 1)	AND 2#11;		(* Received QoS: should be 0 *)
+xRecvRetain	:= 		 (abInBuffer[diInBufferOffset + 0]		AND 2#1) > 0;	(* Received Reatain flag *)
 
 q_sLog := CONCAT('Received PUBLISH from Broker (d', BYTE_TO_STRING(BOOL_TO_BYTE(xRecvDup)));
 q_sLog := CONCAT(CONCAT(q_sLog, ', q'), BYTE_TO_STRING(bRecvQoS));
@@ -618,22 +635,22 @@ q_wState := 2#0000110000;
 
 IF bRecvQoS = 0 (* AND xDup = FALSE *) THEN	(* Ensure QoS = 0 *)
 	(* Remaining length: Number of bytes left within current packet, including variable header plus payload. *)
-	fbDecodeRemainingLength(pabRemainingLengthBytes := ADR(abInBuffer[1]));
+	fbDecodeRemainingLength(pabRemainingLengthBytes := ADR(abInBuffer[diInBufferOffset + 1]));
 
 	uiRecvTopicLength :=																								(* Fixed Header Length = 1 + fbDecodeRemainingLength.iRemainingLengthLength;*)
-		SHL(	BYTE_TO_UINT(abInBuffer[1 + fbDecodeRemainingLength.iRemainingLengthLength]), 8)		(* Topic Length MSB *)
-		+		BYTE_TO_UINT(abInBuffer[1 + fbDecodeRemainingLength.iRemainingLengthLength + 1]);		(* Topic Length LSB *)
+		SHL(	BYTE_TO_UINT(abInBuffer[diInBufferOffset + 1 + fbDecodeRemainingLength.iRemainingLengthLength]), 8)		(* Topic Length MSB *)
+		+		BYTE_TO_UINT(abInBuffer[diInBufferOffset + 1 + fbDecodeRemainingLength.iRemainingLengthLength + 1]);		(* Topic Length LSB *)
 
 	(* The length of the payload can be calculated by subtracting the length of the variable header from the Remaining Length field that is in the Fixed Header. *)
 	uiRecvPayloadLength := fbDecodeRemainingLength.uiRemainingLength - (2 + uiRecvTopicLength + 0);	(* Variable Header Length = 2 + Topic Length + 0-2 (depending on QoS)*)
 
 	(* Topic *)
 	SysMemSet(ADR(q_sLastReceivedTopic), 0, MQTT_TOPIC_MAX_LENGTH);
-	SysMemMove(ADR(abInBuffer[1 + fbDecodeRemainingLength.iRemainingLengthLength + 2]), ADR(q_sLastReceivedTopic), MIN(uiRecvTopicLength, MQTT_TOPIC_MAX_LENGTH));	(* Security: MQTT_TOPIC_MAX_LENGTH *)
+	SysMemMove(ADR(q_sLastReceivedTopic), ADR(abInBuffer[diInBufferOffset + 1 + fbDecodeRemainingLength.iRemainingLengthLength + 2]), MIN(uiRecvTopicLength, MQTT_TOPIC_MAX_LENGTH));	(* Security: MQTT_TOPIC_MAX_LENGTH *)
 
 	(* Payload *)
 	SysMemSet(ADR(q_sLastReceivedMessage), 0, MQTT_MESSAGE_MAX_LENGTH);
-	SysMemMove(ADR(abInBuffer[1 + fbDecodeRemainingLength.iRemainingLengthLength + 2 + uiRecvTopicLength]), ADR(q_sLastReceivedMessage), MIN(uiRecvPayloadLength, MQTT_MESSAGE_MAX_LENGTH));	(* Security: MQTT_MESSAGE_MAX_LENGTH *)
+	SysMemMove(ADR(q_sLastReceivedMessage), ADR(abInBuffer[diInBufferOffset + 1 + fbDecodeRemainingLength.iRemainingLengthLength + 2 + uiRecvTopicLength]), MIN(uiRecvPayloadLength, MQTT_MESSAGE_MAX_LENGTH));	(* Security: MQTT_MESSAGE_MAX_LENGTH *)
 
 	q_xReceivedMessageNotification := TRUE;
 	q_xError := FALSE;
@@ -650,7 +667,11 @@ ELSE
 	q_xError := TRUE;
 	q_wState := 2#1000110000;	(* Next Step: IDLE *)
 END_IF
-diRecvResult := 0;
+
+diInBufferOffset := diInBufferOffset + 1 + fbDecodeRemainingLength.iRemainingLengthLength + fbDecodeRemainingLength.uiRemainingLength;
+IF diRecvResult - diInBufferOffset <= 0 THEN
+	diRecvResult := 0;
+END_IF
 END_ACTION
 
 ACTION	AC_HandlePUBREC:
@@ -713,12 +734,15 @@ Notes:
 q_sLog := 'Received SUBACK from Broker';
 q_wState := 2#0010010000;
 
-wRecvPacketIdentifier :=	SHL(	BYTE_TO_UINT(abInBuffer[2]), 8)	(* Packet Identifier MSB *)
-							+		BYTE_TO_UINT(abInBuffer[3]);		(* Packet Identifier LSB *)
+(* Remaining length: Number of bytes left within current packet, including variable header plus payload. *)
+fbDecodeRemainingLength(pabRemainingLengthBytes := ADR(abInBuffer[diInBufferOffset + 1]));
+
+wRecvPacketIdentifier :=	SHL(	BYTE_TO_UINT(abInBuffer[diInBufferOffset + 1 + fbDecodeRemainingLength.iRemainingLengthLength]), 8)	(* Packet Identifier MSB *)
+							+		BYTE_TO_UINT(abInBuffer[diInBufferOffset + 1 + fbDecodeRemainingLength.iRemainingLengthLength + 1]);	(* Packet Identifier LSB *)
 
 (* Success *)
-IF wRecvPacketIdentifier = wSendPacketIdentifier						(* The variable header contains the Packet Identifier from the SUBSCRIBE Packet that is being acknowledged. *)
-AND abInBuffer[diRecvResult-1] < 16#80 THEN							(* should = 0x00 for QoS 0, 0x80 = error *)
+IF wRecvPacketIdentifier = wSendPacketIdentifier	(* The variable header contains the Packet Identifier from the SUBSCRIBE Packet that is being acknowledged. *)
+AND abInBuffer[diInBufferOffset + 1 + fbDecodeRemainingLength.iRemainingLengthLength + 2] < 16#80 THEN	(* should = 0x00 for QoS 0, 0x80 = error *)
 	xAwaitingSUBACK := FALSE;
 	xResetKeepAliveTimer := TRUE;
 	q_xError := FALSE;
@@ -726,7 +750,7 @@ AND abInBuffer[diRecvResult-1] < 16#80 THEN							(* should = 0x00 for QoS 0, 0x
 
 (* Error *)
 ELSE
-	IF abInBuffer[diRecvResult-1] = 16#80 THEN
+	IF abInBuffer[diInBufferOffset + 1 + fbDecodeRemainingLength.iRemainingLengthLength + 2] = 16#80 THEN
 		q_sLog := 'SUBACK message reported failure (RC=0x80)';
 	ELSE
 		q_sLog := 'Received invalid SUBACK message';
@@ -735,7 +759,11 @@ ELSE
 	q_wState := 2#1010010001;	(* Close Socket *)
 END_IF
 diSendResult := 0;
-diRecvResult := 0;
+
+diInBufferOffset := diInBufferOffset + 1 + fbDecodeRemainingLength.iRemainingLengthLength + fbDecodeRemainingLength.uiRemainingLength;
+IF diRecvResult - diInBufferOffset <= 0 THEN
+	diRecvResult := 0;
+END_IF
 END_ACTION
 
 ACTION	AC_HandleSUBSCRIBE:
@@ -771,11 +799,14 @@ Notes:
 q_sLog := 'Received UNSUBACK from Broker';
 q_wState := 2#0010110000;
 
-wRecvPacketIdentifier :=	SHL(	BYTE_TO_UINT(abInBuffer[2]), 8)	(* Packet Identifier MSB *)
-							+		BYTE_TO_UINT(abInBuffer[3]);		(* Packet Identifier LSB *)
+(* Remaining length: Number of bytes left within current packet, including variable header plus payload. *)
+fbDecodeRemainingLength(pabRemainingLengthBytes := ADR(abInBuffer[diInBufferOffset + 1]));
+
+wRecvPacketIdentifier :=	SHL(	BYTE_TO_UINT(abInBuffer[diInBufferOffset + 1 + fbDecodeRemainingLength.iRemainingLengthLength]), 8)	(* Packet Identifier MSB *)
+							+		BYTE_TO_UINT(abInBuffer[diInBufferOffset + 1 + fbDecodeRemainingLength.iRemainingLengthLength + 1]);	(* Packet Identifier LSB *)
 
 (* Success *)
-IF wRecvPacketIdentifier = wSendPacketIdentifier THEN				(* The variable header contains the Packet Identifier of the UNSUBSCRIBE Packet that is being acknowledged. *)
+IF wRecvPacketIdentifier = wSendPacketIdentifier THEN	(* The variable header contains the Packet Identifier of the UNSUBSCRIBE Packet that is being acknowledged. *)
 	xAwaitingUNSUBACK := FALSE;
 	xResetKeepAliveTimer := TRUE;
 	q_xError := FALSE;
@@ -788,7 +819,11 @@ ELSE
 	q_wState := 2#1010110001;	(* Close Socket *)
 END_IF
 diSendResult := 0;
-diRecvResult := 0;
+
+diInBufferOffset := diInBufferOffset + 1 + fbDecodeRemainingLength.iRemainingLengthLength + fbDecodeRemainingLength.uiRemainingLength;
+IF diRecvResult - diInBufferOffset <= 0 THEN
+	diRecvResult := 0;
+END_IF
 END_ACTION
 
 ACTION	AC_HandleUNSUBSCRIBE:
@@ -949,7 +984,7 @@ IF i_sClientIdentifier = '' THEN
 ELSE
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := 0;														(* Given ClientId length MSB (always 0 since i_sClientIdentifier is always less than 23 chars length) *)
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(i_sClientIdentifier));				(* Given ClientId length LSB *)
-	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(i_sClientIdentifier), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sClientIdentifier));
+	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(abOutBuffer[iSendIndexCount]), ADR(i_sClientIdentifier), LEN(i_sClientIdentifier));
 	iSendIndexCount := iSendIndexCount + LEN(i_sClientIdentifier) - 1;
 END_IF
 
@@ -957,7 +992,7 @@ END_IF
 IF i_sWillTopic <> '' THEN
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(SHR(LEN(i_sWillTopic), 8));			(* Will Topic length MSB *)
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(i_sWillTopic));					(* Will Topic length LSB *)
-	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(i_sWillTopic), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sWillTopic));
+	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(abOutBuffer[iSendIndexCount]), ADR(i_sWillTopic), LEN(i_sWillTopic));
 	iSendIndexCount := iSendIndexCount + LEN(i_sWillTopic) - 1;
 END_IF
 
@@ -965,7 +1000,7 @@ END_IF
 IF i_sWillMessage <> '' THEN
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(SHR(LEN(i_sWillMessage), 8));		(* Will Message length MSB *)
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(i_sWillMessage));				(* Will Message length LSB *)
-	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(i_sWillMessage), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sWillMessage));
+	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(abOutBuffer[iSendIndexCount]), ADR(i_sWillMessage), LEN(i_sWillMessage));
 	iSendIndexCount := iSendIndexCount + LEN(i_sWillMessage) - 1;
 END_IF
 
@@ -973,7 +1008,7 @@ END_IF
 IF i_sUsername <> '' THEN
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(SHR(LEN(i_sUsername), 8));		(* User Name length MSB *)
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(i_sUsername));					(* User Name length LSB *)
-	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(i_sUsername), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sUsername));
+	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(abOutBuffer[iSendIndexCount]), ADR(i_sUsername), LEN(i_sUsername));
 	iSendIndexCount := iSendIndexCount + LEN(i_sUsername) - 1;
 END_IF
 
@@ -981,7 +1016,7 @@ END_IF
 IF i_sPassword <> '' THEN
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(SHR(LEN(i_sPassword), 8));		(* Password length MSB *)
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(i_sPassword));					(* Password length LSB *)
-	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(i_sPassword), ADR(abOutBuffer[iSendIndexCount]), LEN(i_sPassword));
+	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(abOutBuffer[iSendIndexCount]), ADR(i_sPassword), LEN(i_sPassword));
 	iSendIndexCount := iSendIndexCount + LEN(i_sUsername) - 1;
 END_IF
 
@@ -1174,13 +1209,13 @@ END_FOR
 iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(sPublishTopic));			(* Topic Length LSB *)
 
 (* Topic MUST be present as the first field in the PUBLISH Packet Variable header (after topic length) *)
-iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(sPublishTopic), ADR(abOutBuffer[iSendIndexCount]), LEN(sPublishTopic));
+iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(abOutBuffer[iSendIndexCount]), ADR(sPublishTopic), LEN(sPublishTopic));
 iSendIndexCount := iSendIndexCount + LEN(sPublishTopic) - 1;
 
 (* Packet Identifier: !!! A PUBLISH Packet MUST NOT contain a Packet Identifier if its QoS value is set to 0 !!! *)
 
 (* Payload *)
-iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(sPublishMessage), ADR(abOutBuffer[iSendIndexCount]), LEN(sPublishMessage));
+iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(abOutBuffer[iSendIndexCount]), ADR(sPublishMessage), LEN(sPublishMessage));
 iSendIndexCount := iSendIndexCount + LEN(sPublishMessage) - 1;
 
 (* Send PUBLISH *)
@@ -1260,8 +1295,8 @@ iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_B
 iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(sSubscribeTopic));					(* Payload: Topic Length LSB *)
 
 (* Topic Filter *)
-iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(sSubscribeTopic), ADR(abOutBuffer[iSendIndexCount]), LEN(sSubscribeTopic));
-iSendIndexCount := iSendIndexCount + LEN(sSubscribeTopic) -1;
+iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(abOutBuffer[iSendIndexCount]), ADR(sSubscribeTopic), LEN(sSubscribeTopic));
+iSendIndexCount := iSendIndexCount + LEN(sSubscribeTopic) - 1;
 
 (* Topic Requested QoS *)
 iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := 0;	(* QoS = 0 *)
@@ -1344,7 +1379,7 @@ iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_B
 iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(sUnsubscribeTopic));				(* Payload: Topic Length LSB *)
 
 (* Topic Filter *)
-iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(sUnsubscribeTopic), ADR(abOutBuffer[iSendIndexCount]), LEN(sUnsubscribeTopic));
+iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(abOutBuffer[iSendIndexCount]), ADR(sUnsubscribeTopic), LEN(sUnsubscribeTopic));
 iSendIndexCount := iSendIndexCount + LEN(sUnsubscribeTopic) - 1;
 
 (* Send UNSUBSCRIBE *)
