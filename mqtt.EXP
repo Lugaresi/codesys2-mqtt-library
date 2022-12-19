@@ -1017,7 +1017,7 @@ IF i_sPassword <> '' THEN
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(SHR(LEN(i_sPassword), 8));		(* Password length MSB *)
 	iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := INT_TO_BYTE(LEN(i_sPassword));					(* Password length LSB *)
 	iSendIndexCount := iSendIndexCount + 1;	SysMemMove(ADR(abOutBuffer[iSendIndexCount]), ADR(i_sPassword), LEN(i_sPassword));
-	iSendIndexCount := iSendIndexCount + LEN(i_sUsername) - 1;
+	iSendIndexCount := iSendIndexCount + LEN(i_sPassword) - 1;
 END_IF
 
 (* Send CONNECT *)
