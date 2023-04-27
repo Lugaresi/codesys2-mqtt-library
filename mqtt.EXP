@@ -845,14 +845,11 @@ ACTION	AC_KeepAlive:
 - A Keep Alive value of zero (0) has the effect of turning off the keep alive mechanism. This means that, in this case, the Server is not required to disconnect the Client on the grounds of inactivity.
 - Note that a Server is permitted to disconnect a Client that it determines to be inactive or non-responsive at any time, regardless of the Keep Alive value provided by that Client.
 - If the Keep Alive value is non-zero and the Server does not receive a Control Packet from the Client within one and a half times the Keep Alive time period, it MUST disconnect the Network Connection to the Client as if the network had failed [MQTT-3.1.2-24].
-- Keep Alive maximum time interval is 18 hours 12 minutes and 15 seconds
+- Keep Alive maximum time interval is 65535 seconds, resulting in 18 hours 12 minutes and 15 seconds.
 *)
 
 IF i_tKeepAliveTimeInterval > t#18h12m15s THEN
 	i_tKeepAliveTimeInterval := t#18h12m15s;
-	q_sLog := 'Invalid Keep Alive Time Interval defined. Set to max value 18h12m15s';
-	q_xError := TRUE;
-	q_wState := 2#1111000000;
 END_IF
 
 fbKeepAliveTimer(IN := NOT xResetKeepAliveTimer AND (i_tKeepAliveTimeInterval > t#0s), PT := i_tKeepAliveTimeInterval);
@@ -948,7 +945,7 @@ iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := 0
 												OR (BOOL_TO_BYTE(i_xCleanSession)	*	2#00000010);	(* Clean Session *)
 																								(*	2#00000000*)	(* Reserved *)
 (* Keep Alive*)
-(* Validate Keep Alive is an integer from 0 to 65535, representing the maximum time in seconds allowed to elapse between MQTT protocol packets sent by the client. *)
+(* Valid Keep Alive is an integer from 0 to 65535, representing the maximum time in seconds allowed to elapse between MQTT protocol packets sent by the client. *)
 IF i_tKeepAliveTimeInterval > t#65535s THEN
 	i_tKeepAliveTimeInterval := t#65535s;
 END_IF
