@@ -848,11 +848,7 @@ ACTION	AC_KeepAlive:
 - Keep Alive maximum time interval is 65535 seconds, resulting in 18 hours 12 minutes and 15 seconds.
 *)
 
-IF i_tKeepAliveTimeInterval > t#18h12m15s THEN
-	i_tKeepAliveTimeInterval := t#18h12m15s;
-END_IF
-
-fbKeepAliveTimer(IN := NOT xResetKeepAliveTimer AND (i_tKeepAliveTimeInterval > t#0s), PT := i_tKeepAliveTimeInterval);
+fbKeepAliveTimer(IN := NOT xResetKeepAliveTimer AND (i_tKeepAliveTimeInterval > t#0s), PT := MIN(i_tKeepAliveTimeInterval, MQTT_KEEPALIVE_MAX_VALUE));
 xResetKeepAliveTimer := FALSE;		(* Keep Alive timer should run when IDLE *)
 
 (* Keep Alive timeout reached and no ongoing send request *)
