@@ -947,9 +947,8 @@ iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := 0
 (* Keep Alive*)
 (* Valid Keep Alive is an integer from 0 to 65535, representing the maximum time in seconds allowed to elapse between MQTT protocol packets sent by the client. *)
 (* Datatype TIME is internally based on milliseconds stored on a DWORD, so TIME_TO_DWORD gets milliseconds. Divide by 1000 to provide a valid protocoll value based on seconds. *)
-iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := DWORD_TO_BYTE(SHR((TIME_TO_DWORD(MIN(i_tKeepAliveTimeInterval, t#65535s)) / 1000), 8));	(* Keep Alive MSB *)
-
-iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := DWORD_TO_BYTE(TIME_TO_DWORD(MIN(i_tKeepAliveTimeInterval, t#65535s)) / 1000);			(* Keep Alive LSB *)
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := DWORD_TO_BYTE(SHR((TIME_TO_DWORD(MIN(i_tKeepAliveTimeInterval, MQTT_KEEPALIVE_MAX_VALUE)) / 1000), 8));	(* Keep Alive MSB *)
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := DWORD_TO_BYTE(TIME_TO_DWORD(MIN(i_tKeepAliveTimeInterval, MQTT_KEEPALIVE_MAX_VALUE)) / 1000);			(* Keep Alive LSB *)
 
 
 (* Client Identifier *)
