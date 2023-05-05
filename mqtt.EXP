@@ -897,7 +897,7 @@ Notes:
 - Payload: it contains one or more length-prefixed fields, whose presence is determined by the flags in the variable header. These fields, if present, MUST appear in the order Client Identifier, Will Topic, Will Message, User Name, Password
 	- Client Identifier: each Client connecting to the Server has a unique ClientId. The ClientId MUST be present and MUST be the first field in the CONNECT packet payload.
 		The Server MUST allow ClientIds which are between 1 and 23 UTF-8 encoded bytes in length, and that contain only the characters "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".
-		* The Server MAY allow ClientId’s that contain more than 23 encoded bytes. The Server MAY allow ClientId’s that contain characters not included in the list given above.
+		* The Server MAY allow ClientIdÂ’s that contain more than 23 encoded bytes. The Server MAY allow ClientIdÂ’s that contain characters not included in the list given above.
 		If the Client supplies a zero-byte ClientId, the Client MUST also set CleanSession to 1.
 		If the Client supplies a zero-byte ClientId with CleanSession set to 0, the Server MUST respond to the CONNECT Packet with a CONNACK return code 0x02 (Identifier rejected) and then close the Network Connection.
 		If the Server rejects the ClientId it MUST respond to the CONNECT Packet with a CONNACK return code 0x02 (Identifier rejected) and then close the Network Connection.
@@ -946,12 +946,11 @@ iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := 0
 																								(*	2#00000000*)	(* Reserved *)
 (* Keep Alive*)
 (* Valid Keep Alive is an integer from 0 to 65535, representing the maximum time in seconds allowed to elapse between MQTT protocol packets sent by the client. *)
-IF i_tKeepAliveTimeInterval > t#65535s THEN
-	i_tKeepAliveTimeInterval := t#65535s;
-END_IF
 (* Datatype TIME is internally based on milliseconds stored on a DWORD, so TIME_TO_DWORD gets milliseconds. Divide by 1000 to provide a valid protocoll value based on seconds. *)
-iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := DWORD_TO_BYTE(SHR((TIME_TO_DWORD(i_tKeepAliveTimeInterval) / 1000), 8));	(* Keep Alive MSB *)
-iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := DWORD_TO_BYTE(TIME_TO_DWORD(i_tKeepAliveTimeInterval) / 1000);			(* Keep Alive LSB *)		(* Keep Alive LSB *)
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := DWORD_TO_BYTE(SHR((TIME_TO_DWORD(MIN(i_tKeepAliveTimeInterval, t#65535s)) / 1000), 8));	(* Keep Alive MSB *)
+
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := DWORD_TO_BYTE(TIME_TO_DWORD(MIN(i_tKeepAliveTimeInterval, t#65535s)) / 1000);			(* Keep Alive LSB *)
+
 
 (* Client Identifier *)
 IF i_sClientIdentifier = '' THEN
