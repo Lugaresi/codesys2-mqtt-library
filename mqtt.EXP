@@ -114,6 +114,7 @@ VAR CONSTANT
 	MQTT_MESSAGE_MAX_LENGTH	: UINT := 255;
 	MQTT_USERNAME_MAX_LENGTH	: UINT := 80;
 	MQTT_PASSWORD_MAX_LENGTH	: UINT := 80;
+	MQTT_KEEPALIVE_MAX_VALUE		: TIME := t#65535s;
 END_VAR
 
 VAR_INPUT
@@ -845,17 +846,10 @@ ACTION	AC_KeepAlive:
 - A Keep Alive value of zero (0) has the effect of turning off the keep alive mechanism. This means that, in this case, the Server is not required to disconnect the Client on the grounds of inactivity.
 - Note that a Server is permitted to disconnect a Client that it determines to be inactive or non-responsive at any time, regardless of the Keep Alive value provided by that Client.
 - If the Keep Alive value is non-zero and the Server does not receive a Control Packet from the Client within one and a half times the Keep Alive time period, it MUST disconnect the Network Connection to the Client as if the network had failed [MQTT-3.1.2-24].
-- Keep Alive maximum time interval is 18 hours 12 minutes and 15 seconds
+- Keep Alive maximum time interval is 65535 seconds, resulting in 18 hours 12 minutes and 15 seconds.
 *)
 
-IF i_tKeepAliveTimeInterval > t#18h12m15s THEN
-	i_tKeepAliveTimeInterval := t#18h12m15s;
-	q_sLog := 'Invalid Keep Alive Time Interval defined. Set to max value 18h12m15s';
-	q_xError := TRUE;
-	q_wState := 2#1111000000;
-END_IF
-
-fbKeepAliveTimer(IN := NOT xResetKeepAliveTimer AND (i_tKeepAliveTimeInterval > t#0s), PT := i_tKeepAliveTimeInterval);
+fbKeepAliveTimer(IN := NOT xResetKeepAliveTimer AND (i_tKeepAliveTimeInterval > t#0s), PT := MIN(i_tKeepAliveTimeInterval, MQTT_KEEPALIVE_MAX_VALUE));
 xResetKeepAliveTimer := FALSE;		(* Keep Alive timer should run when IDLE *)
 
 (* Keep Alive timeout reached and no ongoing send request *)
@@ -900,7 +894,7 @@ Notes:
 - Payload: it contains one or more length-prefixed fields, whose presence is determined by the flags in the variable header. These fields, if present, MUST appear in the order Client Identifier, Will Topic, Will Message, User Name, Password
 	- Client Identifier: each Client connecting to the Server has a unique ClientId. The ClientId MUST be present and MUST be the first field in the CONNECT packet payload.
 		The Server MUST allow ClientIds which are between 1 and 23 UTF-8 encoded bytes in length, and that contain only the characters "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".
-		* The Server MAY allow ClientId’s that contain more than 23 encoded bytes. The Server MAY allow ClientId’s that contain characters not included in the list given above.
+		* The Server MAY allow ClientIdÂ’s that contain more than 23 encoded bytes. The Server MAY allow ClientIdÂ’s that contain characters not included in the list given above.
 		If the Client supplies a zero-byte ClientId, the Client MUST also set CleanSession to 1.
 		If the Client supplies a zero-byte ClientId with CleanSession set to 0, the Server MUST respond to the CONNECT Packet with a CONNACK return code 0x02 (Identifier rejected) and then close the Network Connection.
 		If the Server rejects the ClientId it MUST respond to the CONNECT Packet with a CONNACK return code 0x02 (Identifier rejected) and then close the Network Connection.
@@ -948,8 +942,11 @@ iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := 0
 												OR (BOOL_TO_BYTE(i_xCleanSession)	*	2#00000010);	(* Clean Session *)
 																								(*	2#00000000*)	(* Reserved *)
 (* Keep Alive*)
-iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := WORD_TO_BYTE(SHR(TIME_TO_WORD(i_tKeepAliveTimeInterval), 8));	(* Keep Alive MSB *)
-iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := WORD_TO_BYTE(TIME_TO_WORD(i_tKeepAliveTimeInterval));			(* Keep Alive LSB *)
+(* Valid Keep Alive is an integer from 0 to 65535, representing the maximum time in seconds allowed to elapse between MQTT protocol packets sent by the client. *)
+(* Datatype TIME is internally based on milliseconds stored on a DWORD, so TIME_TO_DWORD gets milliseconds. Divide by 1000 to provide a valid protocoll value based on seconds. *)
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := DWORD_TO_BYTE(SHR((TIME_TO_DWORD(MIN(i_tKeepAliveTimeInterval, MQTT_KEEPALIVE_MAX_VALUE)) / 1000), 8));	(* Keep Alive MSB *)
+iSendIndexCount := iSendIndexCount + 1;	abOutBuffer[iSendIndexCount] := DWORD_TO_BYTE(TIME_TO_DWORD(MIN(i_tKeepAliveTimeInterval, MQTT_KEEPALIVE_MAX_VALUE)) / 1000);			(* Keep Alive LSB *)
+
 
 (* Client Identifier *)
 IF i_sClientIdentifier = '' THEN
