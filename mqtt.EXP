@@ -93,7 +93,7 @@ END_FUNCTION_BLOCK
 (* @OBJECTFLAGS := '0, 8' *)
 (* @SYMFILEFLAGS := '2048' *)
 (*	This Function Block implements an MQTT Client
-	Version: 2.8
+	Version: 2.9
 	Supported:
 		CONNECT / DISCONNECT / PING (Keep Alive)
 		SUBSCRIBE / UNSUBSCRIBE (single topic)
