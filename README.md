@@ -4,7 +4,7 @@ This Client follows [MQTT Specifications v3.1.1](http://docs.oasis-open.org/mqtt
 The only dependencies are Standard, SysLibSockets and SysLibMem libraries.
 
 The following MQTT features are supported:
-- CONNECT (incl. randomized or defined ClientId, User/Password authentication, Last Will QoS 0, auto. reconnection) / DISCONNECT
+- CONNECT (incl. randomized or defined ClientId, User/Password authentication (max-length: 80), Last Will QoS 0, auto. reconnection) / DISCONNECT
 - Keep Alive (PINGREQ / PINGRESP)
-- PUBLISH QoS 0 (incl. Retain)
+- PUBLISH QoS 0 (incl. Retain, topic max-length: 80)
 - SUBSCRIBE  QoS 0 (SUBACK) / UNSUBSCRIBE (UNSUBACK)
